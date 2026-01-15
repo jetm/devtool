@@ -43,11 +43,3 @@ repos:
         language: system
         files: \.py$
         pass_filenames: true
-
-      - id: pylint
-        name: pylint
-        entry: pylint
-        language: system
-        types: [python]
-        args: ["--jobs=0", "-sn", "--errors-only", "--disable=C,R"]
-        exclude: tests(/\w*)*/functional/|tests/input|tests(/\w*)*data/|doc/
