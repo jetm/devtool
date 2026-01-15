@@ -5,7 +5,6 @@
 #     "claude-agent-sdk>=0.1.0",
 #     "click>=8.0.0",
 #     "rich>=13.0.0",
-#     "pyperclip>=1.8.0",
 #     "tomli>=2.0.0",
 # ]
 # ///
@@ -21,66 +20,90 @@ logging, Claude SDK wrapper, and consistent error handling).
 
 Usage examples:
 
-  # Basic usage
-  ./lx.py "show disk usage"
-
-  # Multi-word instruction
-  ./lx.py show me all running processes sorted by memory usage
+  # Ask a question (instruction must be quoted)
+  ./lx.py ask "show disk usage"
 
   # With verbose logging
-  ./lx.py -v "configure firewall to allow port 8080"
+  ./lx.py -v ask "configure firewall to allow port 8080"
 
-  # Plain text output (no colors/formatting)
-  ./lx.py --plain-text "list all users on the system"
+  # Enable Rich Markdown formatting
+  ./lx.py --markdown ask "list all users on the system"
+
+  # Run diagnostic checks
+  ./lx.py doctor
 
 Features:
-  - Claude response rendered with Rich Markdown output (unless --plain-text)
-  - Extracts bash/sh/shell fenced code blocks and inline prompt-style commands
-    for later interactive handling (next phase)
-  - Shares configuration via ~/.config/aca/config.toml through common utilities
+  - Uses Claude Sonnet by default for faster responses (configurable)
+  - Plain text output by default; use --markdown for Rich formatted output
+  - Structured prompt limits Claude to 1-3 commands for clean extraction
+  - Extracts bash/sh/shell fenced code blocks
+  - Interactive command selection and execution
+  - Destructive command detection for rm, dd, mkfs, chmod, systemctl operations
+
+Configuration:
+  - Model can be configured via ~/.config/aca/config.toml (default_model key)
+    or ACA_DEFAULT_MODEL environment variable (defaults to "sonnet")
+
+Requirements:
+  - Claude Code CLI (https://claude.ai/download)
 """
 
 import logging
+import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import click
+import tomli
 from rich.console import Console
 from rich.markdown import Markdown
 
 from common_utils import (
     ACAError,
     check_claude_cli,
+    check_network_connectivity,
     generate_with_progress,
     get_config,
     get_console,
     print_error,
-    print_output,
     setup_logging,
 )
 
 logger = logging.getLogger(__name__)
 
 
-LINUX_ENGINEER_PROMPT = """I want you to act as a **Linux engineer with deep expertise in command-line operations, system administration, and troubleshooting**. You should be capable of providing detailed explanations and step-by-step guidance for any Linux-related tasks, including shell scripting, process management, networking, package management, permissions, backup, and security configurations. When I ask a question or describe a task, you will respond with **clear examples of commands**, describe what each command does, and include **best practices** and possible pitfalls to avoid. If there are multiple methods, explain their differences and when to use each.
+LINUX_ENGINEER_PROMPT = """You are a Linux engineer. Provide concise, practical answers.
 
-Your tone should be professional, precise, and educational—imagine you are mentoring a junior system administrator. Always confirm important commands that could modify the system and explain any potential risks before execution.
+RESPONSE FORMAT:
+1. Show 1-3 commands maximum in separate code blocks with no explanations or comments inside code blocks. Show only the commands.
+2. Show the commands in the order of their importance.
+
+Example response format:
+```bash
+command-here
+```
+
+```bash
+another-command
+```
 """
 
 
 def extract_commands(response: str) -> list[str]:
     """Extract executable commands from a Claude response.
 
-    Extracts:
-      - Fenced code blocks with bash/sh/shell language identifiers.
-      - Inline prompt-style commands (lines beginning with `$ ` or `# `).
+    Extracts fenced code blocks with bash/sh/shell language identifiers.
+    The prompt instructs Claude to use separate code blocks for each command,
+    making extraction straightforward.
 
     Returns:
-      A list of command strings (may contain multi-line commands and chains).
+      A list of command strings, deduplicated.
     """
     commands: list[str] = []
+    seen: set[str] = set()
 
     # Code blocks: ```bash ...```, ```sh ...```, ```shell ...```
     code_block_pattern = re.compile(
@@ -88,69 +111,37 @@ def extract_commands(response: str) -> list[str]:
         re.DOTALL | re.IGNORECASE,
     )
     for match in code_block_pattern.finditer(response):
-        block = match.group(1).strip("\n")
-        if not block.strip():
+        block = match.group(1).strip()
+        if not block:
             continue
-
-        # Remove prompt prefixes inside code blocks while preserving structure.
-        cleaned_lines: list[str] = []
-        for line in block.splitlines():
-            cleaned_lines.append(re.sub(r"^\s*[$#]\s+", "", line))
-        cleaned = "\n".join(cleaned_lines).strip()
-        if cleaned:
+        # Remove prompt prefixes if present
+        cleaned = re.sub(r"^\s*[$#]\s+", "", block, flags=re.MULTILINE).strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
             commands.append(cleaned)
-
-    # Inline commands: lines beginning with "$ " or "# "
-    lines = response.splitlines()
-    inline_pattern = re.compile(r"^\s*[$#]\s+(.+)$")
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        m = inline_pattern.match(line)
-        if not m:
-            i += 1
-            continue
-
-        cmd_lines: list[str] = [m.group(1).rstrip()]
-        while i + 1 < len(lines):
-            cur = cmd_lines[-1].rstrip()
-            if not cur:
-                break
-            if not (
-                cur.endswith("\\")
-                or cur.endswith("&&")
-                or cur.endswith("|")
-                or cur.endswith("(")
-            ):
-                break
-
-            next_line = lines[i + 1]
-            if not next_line.strip():
-                break
-            if next_line.lstrip().startswith("```"):
-                break
-
-            # Allow either continued indentation, or another prompt-prefixed line.
-            next_match = inline_pattern.match(next_line)
-            if next_match:
-                cmd_lines.append(next_match.group(1).rstrip())
-                i += 1
-                continue
-
-            cmd_lines.append(next_line.strip("\n").lstrip())
-            i += 1
-
-        cmd = "\n".join(cmd_lines).strip()
-        if cmd:
-            commands.append(cmd)
-
-        i += 1
 
     return commands
 
 
 def is_destructive_command(command: str) -> bool:
-    """Best-effort detection of potentially destructive commands."""
+    """Best-effort detection of potentially destructive commands.
+
+    Detection strategy:
+      1. Pattern matching against known destructive command prefixes
+      2. Context-sensitive analysis for commands like `rm` (checks for -rf flags, root paths)
+      3. Flag-based detection (e.g., --no-preserve-root)
+
+    Pattern categories:
+      - Filesystem destructive: rm, dd, mkfs, fdisk, parted, shred, wipefs, truncate
+      - Permissions/ownership: chmod, chown (can lock out access)
+      - Process-killing: kill -9, pkill, killall
+      - System control: systemctl stop/disable, reboot, shutdown, halt, poweroff, init 0/6
+
+    Context-sensitive logic for `rm`:
+      - Always flagged as potentially destructive
+      - Extra scrutiny for recursive/force flags (-rf, --recursive, --force)
+      - Critical warning for root paths (/, /*)
+    """
     cmd = command.strip()
     if not cmd:
         return False
@@ -215,32 +206,6 @@ def is_destructive_command(command: str) -> bool:
     return False
 
 
-def copy_to_clipboard(console: Console, text: str) -> bool:
-    """Copy text to clipboard with helpful error messages."""
-    try:
-        import pyperclip  # pylint: disable=import-error
-    except Exception as e:
-        print_error(console, f"Clipboard unavailable (pyperclip import failed): {e}")
-        console.print(
-            "Please copy manually or install xclip/xsel (Linux) or pbcopy (macOS)."
-        )
-        return False
-
-    try:
-        pyperclip.copy(text)
-        return True
-    except (
-        getattr(pyperclip, "PyperclipException", Exception),
-        getattr(pyperclip, "PyperclipWindowsException", Exception),
-        getattr(pyperclip, "PyperclipTimeoutException", Exception),
-    ) as e:
-        print_error(console, f"Clipboard unavailable: {e}")
-        console.print(
-            "Please copy manually or install xclip/xsel (Linux) or pbcopy (macOS)."
-        )
-        return False
-
-
 def execute_command(command: str, console: Console) -> tuple[bool, int]:
     """Execute a shell command and print stdout/stderr."""
     try:
@@ -274,8 +239,7 @@ def execute_command(command: str, console: Console) -> tuple[bool, int]:
 def confirm_destructive_command(command: str, console: Console) -> bool:
     """Confirm execution of a potentially destructive command."""
     console.print(
-        "[yellow]Warning:[/yellow] This command may delete files, modify system "
-        "configuration, or cause data loss."
+        "[yellow]Warning:[/yellow] This command may delete files, modify system configuration, or cause data loss."
     )
     if console.no_color:
         console.print(f"Command:\n{command}")
@@ -287,190 +251,87 @@ def confirm_destructive_command(command: str, console: Console) -> bool:
     return answer == "yes"
 
 
-def _print_command_block(command: str, console: Console) -> None:
-    if console.no_color:
-        console.print(f"```\n{command}\n```")
-    else:
-        console.print(Markdown(f"```bash\n{command}\n```"))
-
-
-def _prompt_action() -> str:
-    return (
-        input("What would you like to do? [C]opy / [E]xecute / [S]kip: ")
-        .strip()
-        .lower()
-    )
-
-
-def _normalize_commands(commands: list[str]) -> list[str]:
-    cleaned: list[str] = []
-    for c in commands:
-        c2 = c.strip()
-        if c2:
-            cleaned.append(c2)
-    return cleaned
-
-
-def _parse_selection(selection: str, max_index: int) -> list[int] | None:
-    s = selection.strip().lower()
-    if s == "s":
-        return []
-    if s == "a":
-        return list(range(1, max_index + 1))
-
-    indices: set[int] = set()
-    parts = [p.strip() for p in s.split(",") if p.strip()]
-    if not parts:
-        return None
-
-    for part in parts:
-        if "-" in part:
-            lo_s, hi_s = (x.strip() for x in part.split("-", 1))
-            if not lo_s.isdigit() or not hi_s.isdigit():
-                return None
-            lo = int(lo_s)
-            hi = int(hi_s)
-            if lo < 1 or hi < 1 or lo > max_index or hi > max_index or lo > hi:
-                return None
-            for i in range(lo, hi + 1):
-                indices.add(i)
-            continue
-        if not part.isdigit():
-            return None
-        idx = int(part)
-        if idx < 1 or idx > max_index:
-            return None
-        indices.add(idx)
-
-    return sorted(indices)
-
-
 def handle_commands_interactively(
-    commands: list[str],
-    console: Console,
-    auto_copy: bool,
-    verbose: bool,
+    commands: list[str], console: Console, verbose: bool
 ) -> None:
-    commands = _normalize_commands(commands)
+    """Show extracted commands and let user select one to execute."""
+    # Filter empty commands
+    commands = [c.strip() for c in commands if c.strip()]
+
+    if not commands:
+        return
 
     try:
-        if auto_copy and commands:
-            if verbose:
-                logger.debug("Auto-copy enabled; copying first extracted command")
-            success = copy_to_clipboard(console, commands[0])
-            if verbose:
-                logger.debug("Clipboard copy %s", "succeeded" if success else "failed")
-            if success:
-                console.print("Copied first command to clipboard.")
-                return
-
-        if not commands:
-            console.print("No executable commands found in response")
-            return
-
-        def handle_one(cmd: str, idx: int | None = None) -> None:
-            if idx is not None and verbose:
-                logger.debug(
-                    "User selected command %d: %s", idx, cmd[:50].replace("\n", " ")
-                )
-
-            _print_command_block(cmd, console)
-
-            while True:
-                choice = _prompt_action()
-                if choice == "c":
-                    success = copy_to_clipboard(console, cmd)
-                    if verbose:
-                        logger.debug(
-                            "Clipboard copy %s", "succeeded" if success else "failed"
-                        )
-                    if success:
-                        console.print("Copied to clipboard.")
-                    return
-                if choice == "e":
-                    destructive = is_destructive_command(cmd)
-                    if verbose:
-                        logger.debug(
-                            "Executing command with destructive check: %s",
-                            destructive,
-                        )
-                    if destructive and not confirm_destructive_command(cmd, console):
-                        console.print("Skipped.")
-                        return
-                    ok, exit_code = execute_command(cmd, console)
-                    if verbose:
-                        logger.debug(
-                            "Command execution %s (exit_code=%d)",
-                            "succeeded" if ok else "failed",
-                            exit_code,
-                        )
-                    return
-                if choice == "s":
-                    return
-                print_error(console, "Invalid choice. Please enter c, e, or s.")
-
-        if len(commands) == 1:
-            handle_one(commands[0], 1)
-            return
-
-        # Multiple commands
-        console.print("Commands found:")
+        # Show numbered list of commands
         for i, cmd in enumerate(commands, 1):
-            preview = cmd.strip().splitlines()[0].strip()
-            if len(preview) > 100:
-                preview = preview[:97] + "..."
-            suffix = " (multi-line)" if "\n" in cmd else ""
-            console.print(f"[bold]{i}[/bold]. {preview}{suffix}")
+            console.print(f"{i}. {cmd}")
 
-        while True:
-            sel = input("Select command number (or 'a' for all, 's' to skip): ").strip()
-            parsed = _parse_selection(sel, len(commands))
-            if parsed is None:
-                print_error(
-                    console,
-                    "Invalid selection. Use a number, 'a', 's', or comma/range like 1,3 or 2-4.",
-                )
-                continue
-            if parsed == []:
-                return
-            for idx in parsed:
-                handle_one(commands[idx - 1], idx)
+        # Prompt for selection
+        selection = input("Which command to run? (number or Enter to skip): ").strip()
+        if not selection:
             return
+
+        try:
+            idx = int(selection)
+            if idx < 1 or idx > len(commands):
+                print_error(console, f"Invalid selection. Enter 1-{len(commands)}")
+                return
+        except ValueError:
+            print_error(console, "Invalid input. Enter a number.")
+            return
+
+        cmd = commands[idx - 1]
+        if verbose:
+            logger.debug(
+                "User selected command %d: %s", idx, cmd[:50].replace("\n", " ")
+            )
+
+        # Check for destructive commands
+        if is_destructive_command(cmd):
+            if not confirm_destructive_command(cmd, console):
+                console.print("Skipped.")
+                return
+
+        # Execute the command
+        execute_command(cmd, console)
 
     except KeyboardInterrupt:
         console.print("\nCancelled.")
-        return
 
 
-@click.command()
-@click.argument("instruction", required=True, nargs=-1)
-@click.option("--plain-text", is_flag=True, help="Output plain text without formatting")
+@click.group()
+@click.option("--markdown", is_flag=True, help="Enable Rich Markdown formatting")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose/debug logging")
-@click.option(
-    "--auto-copy",
-    is_flag=True,
-    help="Automatically copy first command to clipboard",
-)
-def main(
-    instruction: tuple[str, ...],
-    plain_text: bool,
-    verbose: bool,
-    auto_copy: bool,
-) -> None:
+@click.pass_context
+def cli(ctx: click.Context, markdown: bool, verbose: bool) -> None:
+    """Linux command assistant (Claude-powered).
+
+    Use 'lx ask "your question"' to ask a question.
+    Use 'lx doctor' to run diagnostic checks.
+    """
+    ctx.ensure_object(dict)
+    ctx.obj["markdown"] = markdown
+    ctx.obj["verbose"] = verbose
     setup_logging(verbose)
-    _ = get_config()  # Ensure shared config is loaded (and keeps import used).
 
-    instruction_text = " ".join(instruction)
-    if not instruction_text.strip():
-        console = get_console(plain_text)
-        print_error(console, "Instruction is required")
-        sys.exit(1)
 
-    console = get_console(plain_text)
+@cli.command()
+@click.argument("instruction", required=True)
+@click.pass_context
+def ask(ctx: click.Context, instruction: str) -> None:
+    """Ask a Linux question. INSTRUCTION must be quoted.
+
+    Example: lx ask "show disk usage"
+    """
+    markdown = ctx.obj.get("markdown", False)
+    verbose = ctx.obj.get("verbose", False)
+    config = get_config()
+
+    console = get_console(plain_text=not markdown)
     if not check_claude_cli(console):
         sys.exit(1)
 
-    full_prompt = f"{LINUX_ENGINEER_PROMPT}\n\nUser Request: {instruction_text}"
+    full_prompt = f"{LINUX_ENGINEER_PROMPT}\n\nUser Request: {instruction}"
 
     try:
         response = generate_with_progress(
@@ -478,6 +339,7 @@ def main(
             prompt=full_prompt,
             cwd=str(Path.cwd()),
             message="Consulting Linux engineer...",
+            model=config.default_model,
         )
     except ACAError as e:
         print_error(console, e.format_error())
@@ -486,15 +348,141 @@ def main(
         print_error(console, f"Unexpected error: {e}")
         sys.exit(1)
 
-    print_output(console, response, markdown=True)
     extracted = extract_commands(response)
     if verbose:
         logger.debug("Extracted %d command block(s) from response", len(extracted))
-    if extracted:
-        console.print("\n" + ("-" * 80) + "\n")
 
-    handle_commands_interactively(extracted, console, auto_copy, verbose)
+    handle_commands_interactively(extracted, console, verbose)
+
+
+@cli.command()
+@click.pass_context
+def doctor(ctx: click.Context) -> None:
+    """Run diagnostic checks for lx dependencies.
+
+    Checks:
+    - Claude Code CLI installation and version
+    - Claude Code CLI authentication
+    - claude-agent-sdk version
+    - Network connectivity to Anthropic API
+    - Configuration file validity
+    """
+    markdown = ctx.obj.get("markdown", False)
+    console = get_console(plain_text=not markdown)
+
+    console.print("[bold]lx Diagnostic Report[/bold]\n")
+
+    all_passed = True
+
+    # Check Claude Code CLI
+    console.print("Checking Claude Code CLI... ", end="")
+    if shutil.which("claude"):
+        try:
+            result = subprocess.run(
+                ["claude", "--version"], capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                cli_version = result.stdout.strip()
+                console.print(f"[green]✓[/green] {cli_version}")
+            else:
+                console.print("[red]✗ Failed to get version[/red]")
+                console.print(
+                    "  [yellow]Install from https://claude.ai/download[/yellow]"
+                )
+                all_passed = False
+        except subprocess.TimeoutExpired:
+            console.print("[red]✗ Timed out[/red]")
+            all_passed = False
+        except Exception as e:
+            console.print(f"[red]✗ Error: {e}[/red]")
+            all_passed = False
+    else:
+        console.print("[red]✗ Not found[/red]")
+        console.print("  [yellow]Install from https://claude.ai/download[/yellow]")
+        all_passed = False
+
+    # Check Claude Code CLI authentication
+    console.print("Checking Claude Code CLI auth... ", end="")
+    has_api_key = os.environ.get("ANTHROPIC_API_KEY") is not None
+    credentials_file = Path.home() / ".claude" / ".credentials.json"
+    has_credentials_file = credentials_file.exists()
+
+    if has_api_key:
+        console.print("[green]✓[/green] Authenticated (via API key)")
+    elif has_credentials_file:
+        try:
+            import json
+
+            with open(credentials_file, "r") as f:
+                creds = json.load(f)
+            if creds:
+                console.print("[green]✓[/green] Authenticated (via credentials file)")
+            else:
+                console.print(
+                    "[yellow]⚠[/yellow] Credentials file exists but appears empty"
+                )
+                all_passed = False
+        except Exception as e:
+            console.print(f"[yellow]⚠[/yellow] Could not validate credentials: {e}")
+            all_passed = False
+    else:
+        console.print("[red]✗ Not authenticated[/red]")
+        console.print(
+            "  [yellow]Run 'claude' and sign in, or set ANTHROPIC_API_KEY[/yellow]"
+        )
+        all_passed = False
+
+    # Check claude-agent-sdk
+    console.print("Checking claude-agent-sdk... ", end="")
+    try:
+        from importlib.metadata import version
+
+        sdk_version = version("claude-agent-sdk")
+        console.print(f"[green]✓[/green] {sdk_version}")
+    except Exception:
+        console.print("[red]✗ Not found[/red]")
+        console.print("  [yellow]Install with: pip install claude-agent-sdk[/yellow]")
+        all_passed = False
+
+    # Check network connectivity
+    console.print("Checking network connectivity... ", end="")
+    connected, network_error = check_network_connectivity()
+    if connected:
+        console.print("[green]✓[/green] api.anthropic.com reachable")
+    else:
+        console.print(f"[red]✗ {network_error}[/red]")
+        console.print(
+            "  [yellow]Check your internet connection and firewall settings[/yellow]"
+        )
+        all_passed = False
+
+    # Check configuration
+    console.print("Checking configuration... ", end="")
+    config_path = Path.home() / ".config" / "aca" / "config.toml"
+    if config_path.exists():
+        try:
+            with open(config_path, "rb") as f:
+                tomli.load(f)
+            console.print(f"[green]✓[/green] Config file found ({config_path})")
+            config = get_config()
+            console.print(f"    Default model: {config.default_model}")
+            console.print(f"    Timeout: {config.timeout}s")
+        except Exception as e:
+            console.print(f"[yellow]⚠[/yellow] Config file has errors: {e}")
+    else:
+        console.print("[blue]ℹ[/blue] No config file (using defaults)")
+        config = get_config()
+        console.print(f"    Default model: {config.default_model} (default)")
+        console.print(f"    Timeout: {config.timeout}s (default)")
+
+    # Summary
+    console.print()
+    if all_passed:
+        console.print("[green]All checks passed![/green]")
+    else:
+        console.print("[yellow]Some checks failed. Review the output above.[/yellow]")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()  # pylint: disable=no-value-for-parameter
+    cli()  # pylint: disable=no-value-for-parameter

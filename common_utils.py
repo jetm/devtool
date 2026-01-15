@@ -15,6 +15,41 @@ Common utilities for Claude-based CLI tools.
 This module contains shared utilities for configuration management, error handling,
 retry logic, Claude SDK wrappers, console utilities, network checks, and dependency
 validation. It is designed to be imported by CLI tools like aca.py and lx.py.
+
+Main utility categories:
+
+  Configuration:
+    - ACAConfig: Dataclass holding all configuration values
+    - get_config(): Load/cache configuration from ~/.config/aca/config.toml and env vars
+    - setup_logging(): Configure logging based on verbosity and config
+
+  Error Handling:
+    - ACAError: Base exception with context, cause, and troubleshooting steps
+    - ErrorContext: Structured error context (command, exit_code, stderr, extras)
+    - collect_error_context(): Gather system info for debugging
+    - Specialized exceptions: ClaudeAuthenticationError, ClaudeNetworkError,
+      ClaudeCLIError, ClaudeTimeoutError, ClaudeRateLimitError, ClaudeContentError
+
+  Retry Logic:
+    - retry_with_backoff(): Decorator with exponential backoff and jitter
+    - RETRYABLE_EXCEPTIONS: Tuple of exceptions that trigger retry
+
+  Dependency Validation:
+    - check_claude_cli(): Verify Claude CLI is installed and authenticated
+    - check_dependency(): Check if an executable exists in PATH
+    - check_network_connectivity(): Test connection to Anthropic API
+
+  Console Utilities:
+    - get_console(): Create Rich console (plain or formatted)
+    - print_output(): Print text, optionally as Markdown
+    - print_error(): Print error messages with consistent formatting
+
+  Claude SDK Integration:
+    - generate_with_claude(): Async wrapper with retry and timeout handling
+    - generate_with_progress(): Sync wrapper with spinner UI
+    - Model selection: Pass model="sonnet", "opus", or "haiku" to select model
+    - Default model can be configured via ~/.config/aca/config.toml (default_model)
+      or ACA_DEFAULT_MODEL environment variable (defaults to "sonnet")
 """
 
 import asyncio
@@ -53,7 +88,8 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 
 # =============================================================================
-# Configuration
+# Configuration Management
+# Loads settings from ~/.config/aca/config.toml and environment variables
 # =============================================================================
 
 
@@ -68,6 +104,7 @@ class ACAConfig:
     timeout: int = 120
     log_level: str = "WARNING"
     editor: str | None = None
+    default_model: str = "sonnet"
 
     @classmethod
     def load(cls) -> "ACAConfig":
@@ -92,6 +129,7 @@ class ACAConfig:
                 config.timeout = data.get("timeout", config.timeout)
                 config.log_level = data.get("log_level", config.log_level)
                 config.editor = data.get("editor", config.editor)
+                config.default_model = data.get("default_model", config.default_model)
             except Exception as e:
                 logger.warning(f"Failed to load config file {config_path}: {e}")
 
@@ -110,6 +148,9 @@ class ACAConfig:
 
         if env_log_level := os.environ.get("ACA_LOG_LEVEL"):
             config.log_level = env_log_level.upper()
+
+        if env_model := os.environ.get("ACA_DEFAULT_MODEL"):
+            config.default_model = env_model
 
         return config
 
@@ -152,7 +193,8 @@ def setup_logging(verbose: bool = False) -> None:
 
 
 # =============================================================================
-# Exceptions and Error Context
+# Error Handling
+# Custom exception hierarchy with context collection and troubleshooting guidance
 # =============================================================================
 
 
@@ -580,6 +622,7 @@ def _classify_error(e: Exception) -> ACAError:
 
 # =============================================================================
 # Retry Logic
+# Exponential backoff with jitter for transient failures
 # =============================================================================
 
 
@@ -652,7 +695,8 @@ def retry_with_backoff(
 
 
 # =============================================================================
-# Dependency Checks
+# Dependency Validation
+# Check for required executables and authentication
 # =============================================================================
 
 
@@ -833,7 +877,7 @@ def get_precommit_skip_env() -> dict[str, str]:
             match = re.match(r"^\s*-\s*id:\s*([^\s#]+)", line)
             if not match:
                 continue
-            hook_id = match.group(1).strip().strip('"\'')
+            hook_id = match.group(1).strip().strip("\"'")
             if hook_id and hook_id not in seen:
                 seen.add(hook_id)
                 hook_ids.append(hook_id)
@@ -859,6 +903,7 @@ def get_precommit_skip_env() -> dict[str, str]:
 
 # =============================================================================
 # Console Utilities
+# Rich formatting and output helpers
 # =============================================================================
 
 
@@ -886,12 +931,13 @@ def print_error(console: Console, message: str) -> None:
 
 
 # =============================================================================
-# Claude SDK Wrappers
+# Claude SDK Integration
+# Async wrappers with timeout and error handling
 # =============================================================================
 
 
 async def _generate_with_claude_impl(
-    prompt: str, cwd: str, timeout: int | None = None
+    prompt: str, cwd: str, timeout: int | None = None, model: str | None = None
 ) -> str:
     """Internal implementation of generate_with_claude without retry.
 
@@ -899,6 +945,7 @@ async def _generate_with_claude_impl(
         prompt: The prompt to send to Claude.
         cwd: The current working directory for the agent.
         timeout: Timeout in seconds for the operation.
+        model: Model alias to use ("sonnet", "opus", "haiku"). If None, uses config default.
 
     Returns:
         The accumulated text content from the response.
@@ -908,8 +955,9 @@ async def _generate_with_claude_impl(
     """
     config = get_config()
     _timeout = timeout if timeout is not None else config.timeout
+    _model = model if model is not None else config.default_model
 
-    options = ClaudeAgentOptions(permission_mode="acceptEdits", cwd=cwd)
+    options = ClaudeAgentOptions(permission_mode="acceptEdits", cwd=cwd, model=_model)
     accumulated_text = ""
     result_message: ResultMessage | None = None
 
@@ -963,7 +1011,7 @@ async def _generate_with_claude_impl(
 
 @retry_with_backoff()
 async def generate_with_claude(
-    prompt: str, cwd: str, timeout: int | None = None
+    prompt: str, cwd: str, timeout: int | None = None, model: str | None = None
 ) -> str:
     """Call Claude Agent SDK to generate content.
 
@@ -981,6 +1029,8 @@ async def generate_with_claude(
         prompt: The prompt to send to Claude.
         cwd: The current working directory for the agent.
         timeout: Timeout in seconds (default from config/ACA_TIMEOUT env var).
+        model: Model alias to use ("sonnet", "opus", "haiku"). If None, uses
+               config default (from ~/.config/aca/config.toml or ACA_DEFAULT_MODEL).
 
     Returns:
         The accumulated text content from the response.
@@ -993,7 +1043,7 @@ async def generate_with_claude(
         ClaudeRateLimitError: If rate limited (after retries).
         ClaudeContentError: If response is empty or invalid.
     """
-    return await _generate_with_claude_impl(prompt, cwd, timeout)
+    return await _generate_with_claude_impl(prompt, cwd, timeout, model)
 
 
 def generate_with_progress(
@@ -1001,6 +1051,7 @@ def generate_with_progress(
     prompt: str,
     cwd: str,
     message: str = "Generating...",
+    model: str | None = None,
 ) -> str:
     """Generate content with Claude showing a progress spinner.
 
@@ -1009,6 +1060,8 @@ def generate_with_progress(
         prompt: The prompt to send to Claude
         cwd: Current working directory
         message: Message to display during generation
+        model: Model alias to use ("sonnet", "opus", "haiku"). If None, uses
+               config default (from ~/.config/aca/config.toml or ACA_DEFAULT_MODEL).
 
     Returns:
         Generated content from Claude
@@ -1019,7 +1072,7 @@ def generate_with_progress(
     # Don't show spinner if plain text mode
     if console.no_color:
         console.print(message)
-        return asyncio.run(generate_with_claude(prompt, cwd))
+        return asyncio.run(generate_with_claude(prompt, cwd, model=model))
 
     with Progress(
         SpinnerColumn(),
@@ -1028,4 +1081,4 @@ def generate_with_progress(
         transient=True,
     ) as progress:
         progress.add_task(description=message, total=None)
-        return asyncio.run(generate_with_claude(prompt, cwd))
+        return asyncio.run(generate_with_claude(prompt, cwd, model=model))
