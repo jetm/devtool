@@ -4,5 +4,11 @@ LICENSE
 .gitignore
 .chezmoi.toml.tmpl
 .chezmoiignore
-validate-python-version.py
+.chezmoiroot
 .pre-commit-config.yaml
+__pycache__
+*.log
+
+# Python scripts (these are the targets, not chezmoi sources)
+*.py
+git-undo
