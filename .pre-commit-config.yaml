@@ -43,3 +43,9 @@ repos:
         language: system
         files: \.py$
         pass_filenames: true
+
+      - id: pylint
+        name: pylint
+        entry: pylint
+        language: system
+        types: [python]
