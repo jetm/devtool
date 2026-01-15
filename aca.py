@@ -52,6 +52,7 @@ from common_utils import (
     generate_with_progress,
     get_config,
     get_console,
+    get_precommit_skip_env,
     print_error,
     print_output,
     setup_logging,
@@ -442,6 +443,9 @@ def run_precommit_hooks(
 ) -> bool:
     """Run pre-commit hooks on staged files.
 
+    Honors SKIP_PRECOMMIT by translating it to pre-commit's native SKIP env var,
+    dynamically derived from .pre-commit-config.yaml hook IDs.
+
     Args:
         repo: Git repository object
         console: Rich console for output
@@ -450,13 +454,6 @@ def run_precommit_hooks(
     Returns:
         True if hooks pass or are skipped, False if hooks fail
     """
-    # Check if SKIP_PRECOMMIT environment variable is set
-    if os.environ.get("SKIP_PRECOMMIT"):
-        console.print(
-            "[yellow]⚠ Skipping pre-commit hooks (SKIP_PRECOMMIT is set)[/yellow]"
-        )
-        return True
-
     # Check if pre-commit is installed
     if not shutil.which("pre-commit"):
         console.print("[dim]pre-commit not found, skipping hook validation[/dim]")
@@ -466,13 +463,22 @@ def run_precommit_hooks(
     if not staged_files:
         return True
 
+    skip_env = get_precommit_skip_env()
+    if skip_env:
+        console.print(
+            "[yellow]⚠ Skipping pre-commit hooks (SKIP_PRECOMMIT is set)[/yellow]"
+        )
+        return True
+
     # Run pre-commit on staged files
     cmd = ["pre-commit", "run", "--files"] + staged_files
+    env = os.environ.copy()
     result = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         cwd=repo.working_dir,
+        env=env,
     )
 
     if result.returncode == 0:
