@@ -49,3 +49,5 @@ repos:
         entry: pylint
         language: system
         types: [python]
+        args: ["--jobs=0", "-sn", "--errors-only", "--disable=C,R"]
+        exclude: tests(/\w*)*/functional/|tests/input|tests(/\w*)*data/|doc/

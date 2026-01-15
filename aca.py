@@ -473,6 +473,15 @@ def run_precommit_hooks(
         )
         return True, []
 
+    # Capture unstaged state BEFORE running hooks so we can detect new changes
+    try:
+        pre_hook_unstaged_output = repo.git.diff("--name-only")
+        pre_hook_unstaged = {
+            f for f in pre_hook_unstaged_output.split("\n") if f.strip()
+        }
+    except Exception:
+        pre_hook_unstaged = set()
+
     # Run pre-commit on staged files
     cmd = ["pre-commit", "run", "--files"] + staged_files
     env = os.environ.copy()
@@ -485,20 +494,19 @@ def run_precommit_hooks(
     )
 
     # Check which files were modified by hooks
+    # We detect NEW unstaged changes (files that weren't unstaged before but are now)
+    # scoped to the files we asked pre-commit to run on.
     modified_files: list[str] = []
     try:
-        # Hook changes may be left unstaged OR staged (some hooks git-add).
-        # Scope detection to the files we asked pre-commit to run on, so
-        # unrelated working-copy edits don't cause false aborts.
-        unstaged_output = repo.git.diff("--name-only")
-        staged_output = repo.git.diff("--cached", "--name-only")
+        post_hook_unstaged_output = repo.git.diff("--name-only")
+        post_hook_unstaged = {
+            f for f in post_hook_unstaged_output.split("\n") if f.strip()
+        }
 
-        unstaged_changed = {f for f in unstaged_output.split("\n") if f.strip()}
-        staged_changed = {f for f in staged_output.split("\n") if f.strip()}
-        changed = unstaged_changed | staged_changed
-
+        # Only flag files that have NEW unstaged changes and were in our staged set
+        new_unstaged = post_hook_unstaged - pre_hook_unstaged
         staged_set = set(staged_files)
-        modified_files = sorted(changed & staged_set)
+        modified_files = sorted(new_unstaged & staged_set)
     except Exception:
         pass
 
@@ -1847,4 +1855,4 @@ def doctor(ctx: click.Context, full: bool, export: bool) -> None:
 
 
 if __name__ == "__main__":
-    cli()
+    cli()  # pylint: disable=no-value-for-parameter
