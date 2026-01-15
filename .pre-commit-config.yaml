@@ -6,7 +6,7 @@ fail_fast: false
 repos:
   # Ruff - Python linting & formatting
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.11
+    rev: v0.14.13
     hooks:
       - id: ruff-format
       - id: ruff
@@ -43,3 +43,10 @@ repos:
         language: system
         files: \.py$
         pass_filenames: true
+
+      - id: pre-commit-autoupdate
+        name: Update pre-commit hooks
+        entry: pre-commit autoupdate
+        language: system
+        files: \.pre-commit-config.yaml$
+        pass_filenames: false
