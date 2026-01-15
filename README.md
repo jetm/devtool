@@ -7,7 +7,7 @@ Requires Python >= 3.12 and [uv](https://docs.astral.sh/uv/). Scripts are execut
 ```bash
 ./aca.py --help
 ./gitlab-mr-comments.py --help
-python3 ./find_related_commits.py --help
+./find-related-commits.py --help
 ./git-switch-main.py
 ./git-undo --help
 ```
@@ -35,7 +35,7 @@ Find commits in a range that touched currently staged files, then optionally fix
 
 ```bash
 git add <files>
-python3 ./find_related_commits.py HEAD~10
+./find-related-commits.py HEAD~10
 ```
 
 ### gitlab-mr-comments.py
