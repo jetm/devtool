@@ -46,14 +46,14 @@ def get_latest_python_version() -> str:
             check=True,
             timeout=30,
         )
-    except FileNotFoundError:
+    except FileNotFoundError as e:
         raise RuntimeError(
             "uv is not installed. Please install uv: https://docs.astral.sh/uv/getting-started/installation/"
-        )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError("Timed out querying uv for Python versions")
+        ) from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError("Timed out querying uv for Python versions") from e
     except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to query uv for Python versions: {e.stderr}")
+        raise RuntimeError(f"Failed to query uv for Python versions: {e.stderr}") from e
 
     # Parse version numbers from uv output
     # uv outputs lines like: cpython-3.14.0a3-linux-x86_64-gnu (pre-release)
@@ -73,10 +73,7 @@ def get_latest_python_version() -> str:
             versions.add(match.group(1))
 
     if not versions:
-        raise RuntimeError(
-            "No stable Python versions found via uv. "
-            "Please ensure uv is working correctly."
-        )
+        raise RuntimeError("No stable Python versions found via uv. Please ensure uv is working correctly.")
 
     # Sort versions and get the highest one
     sorted_versions = sorted(
@@ -190,9 +187,7 @@ def validate_file(filepath: Path, expected_version: str) -> list[str] | None:
 
     # Validate requires-python
     if metadata["requires_python"] is None:
-        errors.append(
-            f"  Missing requires-python in # /// script block. Expected: {expected_requires_python}"
-        )
+        errors.append(f"  Missing requires-python in # /// script block. Expected: {expected_requires_python}")
     elif metadata["requires_python"] != expected_requires_python:
         errors.append(f"  Expected requires-python: {expected_requires_python}")
         errors.append(f"  Found: {metadata['requires_python']}")
@@ -249,9 +244,7 @@ def main(files: list[str]) -> int:
         expected_requires_python = f">={expected_version}"
         print("To fix:")
         print("1. Update shebang to: #!/usr/bin/env -S uv run --script")
-        print(
-            f"2. Update requires-python to: {expected_requires_python} in the # /// script block"
-        )
+        print(f"2. Update requires-python to: {expected_requires_python} in the # /// script block")
         return 1
 
     return 0

@@ -13,29 +13,25 @@ Usage:
 import argparse
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 
 def get_metadata_content() -> str:
     """Generate metadata section content."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    return f"<!-- Last updated: {today} -->\n<!-- Run: uv run python scripts/update_claude_md.py -->"
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    return f"<!-- Last updated: {today} -->\n<!-- Run: uv run python update-claude-md.py -->"
 
 
 def update_section(content: str, section: str, new_content: str) -> str:
     """Update a section between AUTO-UPDATE markers."""
-    pattern = (
-        rf"(<!-- AUTO-UPDATE:{section} -->\n).*?(\n<!-- AUTO-UPDATE:{section}:end -->)"
-    )
+    pattern = rf"(<!-- AUTO-UPDATE:{section} -->\n).*?(\n<!-- AUTO-UPDATE:{section}:end -->)"
     replacement = rf"\1{new_content}\2"
     return re.sub(pattern, replacement, content, flags=re.DOTALL)
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Update CLAUDE.md with current project state"
-    )
+    parser = argparse.ArgumentParser(description="Update CLAUDE.md with current project state")
     parser.add_argument(
         "--check",
         action="store_true",

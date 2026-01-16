@@ -1,0 +1,29 @@
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # Pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "TCH",  # flake8-type-checking
+]
+ignore = [
+    "SIM102",  # Use single if statement - often reduces readability
+    "SIM105",  # Use contextlib.suppress - adds import for minimal benefit
+    "SIM108",  # Use ternary operator - can reduce readability for complex conditions
+    "SIM110",  # Use any() instead of for loop - sometimes less clear
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Runtime imports incorrectly flagged as type-only
+"aca.py" = ["TCH002", "E501"]  # E501: Long lines in prompt templates are intentional
+"lx.py" = ["TCH002", "E501"]   # E501: Long lines in prompt templates are intentional
+"common_utils.py" = ["TCH002"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["common_utils"]

@@ -177,12 +177,8 @@ def is_destructive_command(command: str) -> bool:
         # Context-sensitive downgrades / upgrades.
         # rm: prioritize strong signals like recursive/force and root paths.
         if re.search(r"(^|[;&|()]\s*)rm(\s|$)", cmd, re.IGNORECASE):
-            rm_is_recursive = re.search(
-                r"\s-(?:[^\n]*r[^\n]*f|[^\n]*f[^\n]*r)", lowered
-            )
-            rm_has_flags = re.search(
-                r"\s--(recursive|force|no-preserve-root)\b", lowered
-            )
+            rm_is_recursive = re.search(r"\s-(?:[^\n]*r[^\n]*f|[^\n]*f[^\n]*r)", lowered)
+            rm_has_flags = re.search(r"\s--(recursive|force|no-preserve-root)\b", lowered)
             rm_targets_root = re.search(r"(\s|^)(/|/\*|/\s*$)", cmd)
             if rm_targets_root and (rm_is_recursive or rm_has_flags):
                 return True
@@ -200,10 +196,7 @@ def is_destructive_command(command: str) -> bool:
         return True
 
     # Additional strong signals even if the base command isn't in the list.
-    if " --no-preserve-root" in lowered:
-        return True
-
-    return False
+    return " --no-preserve-root" in lowered
 
 
 def execute_command(command: str, console: Console) -> tuple[bool, int]:
@@ -245,15 +238,11 @@ def confirm_destructive_command(command: str, console: Console) -> bool:
         console.print(f"Command:\n{command}")
     else:
         console.print(Markdown(f"```bash\n{command}\n```"))
-    answer = input(
-        "Are you sure you want to execute this command? Type 'yes' to confirm: "
-    )
+    answer = input("Are you sure you want to execute this command? Type 'yes' to confirm: ")
     return answer == "yes"
 
 
-def handle_commands_interactively(
-    commands: list[str], console: Console, verbose: bool
-) -> None:
+def handle_commands_interactively(commands: list[str], console: Console, verbose: bool) -> None:
     """Show extracted commands and let user select one to execute."""
     # Filter empty commands
     commands = [c.strip() for c in commands if c.strip()]
@@ -282,9 +271,7 @@ def handle_commands_interactively(
 
         cmd = commands[idx - 1]
         if verbose:
-            logger.debug(
-                "User selected command %d: %s", idx, cmd[:50].replace("\n", " ")
-            )
+            logger.debug("User selected command %d: %s", idx, cmd[:50].replace("\n", " "))
 
         # Check for destructive commands
         if is_destructive_command(cmd):
@@ -378,17 +365,13 @@ def doctor(ctx: click.Context) -> None:
     console.print("Checking Claude Code CLI... ", end="")
     if shutil.which("claude"):
         try:
-            result = subprocess.run(
-                ["claude", "--version"], capture_output=True, text=True, timeout=10
-            )
+            result = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 cli_version = result.stdout.strip()
                 console.print(f"[green]✓[/green] {cli_version}")
             else:
                 console.print("[red]✗ Failed to get version[/red]")
-                console.print(
-                    "  [yellow]Install from https://claude.ai/download[/yellow]"
-                )
+                console.print("  [yellow]Install from https://claude.ai/download[/yellow]")
                 all_passed = False
         except subprocess.TimeoutExpired:
             console.print("[red]✗ Timed out[/red]")
@@ -413,23 +396,19 @@ def doctor(ctx: click.Context) -> None:
         try:
             import json
 
-            with open(credentials_file, "r") as f:
+            with open(credentials_file) as f:
                 creds = json.load(f)
             if creds:
                 console.print("[green]✓[/green] Authenticated (via credentials file)")
             else:
-                console.print(
-                    "[yellow]⚠[/yellow] Credentials file exists but appears empty"
-                )
+                console.print("[yellow]⚠[/yellow] Credentials file exists but appears empty")
                 all_passed = False
         except Exception as e:
             console.print(f"[yellow]⚠[/yellow] Could not validate credentials: {e}")
             all_passed = False
     else:
         console.print("[red]✗ Not authenticated[/red]")
-        console.print(
-            "  [yellow]Run 'claude' and sign in, or set ANTHROPIC_API_KEY[/yellow]"
-        )
+        console.print("  [yellow]Run 'claude' and sign in, or set ANTHROPIC_API_KEY[/yellow]")
         all_passed = False
 
     # Check claude-agent-sdk
@@ -451,9 +430,7 @@ def doctor(ctx: click.Context) -> None:
         console.print("[green]✓[/green] api.anthropic.com reachable")
     else:
         console.print(f"[red]✗ {network_error}[/red]")
-        console.print(
-            "  [yellow]Check your internet connection and firewall settings[/yellow]"
-        )
+        console.print("  [yellow]Check your internet connection and firewall settings[/yellow]")
         all_passed = False
 
     # Check configuration

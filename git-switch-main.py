@@ -47,8 +47,7 @@ def get_repo() -> git.Repo | None:
     except git.exc.InvalidGitRepositoryError:
         console.print(
             Panel(
-                "Not in a git repository.\n\n"
-                "Please run this command from within a git repository.",
+                "Not in a git repository.\n\nPlease run this command from within a git repository.",
                 title="Error",
                 border_style="red",
             )
@@ -67,29 +66,21 @@ def detect_main_branch(repo: git.Repo) -> str | None:
     """
     # Priority 1: Check cached config
     try:
-        cached_branch = repo.config_reader().get_value(
-            "branch-switch", "name", default=None
-        )
+        cached_branch = repo.config_reader().get_value("branch-switch", "name", default=None)
         if cached_branch:
             # Verify the branch exists locally or on origin
             local_exists = cached_branch in [h.name for h in repo.heads]
             remote_exists = False
             try:
-                remote_exists = cached_branch in [
-                    ref.remote_head for ref in repo.remotes.origin.refs
-                ]
+                remote_exists = cached_branch in [ref.remote_head for ref in repo.remotes.origin.refs]
             except (AttributeError, IndexError):
                 pass
 
             if local_exists or remote_exists:
-                console.print(
-                    f"[blue]ℹ[/blue] Using cached main branch: [bold]{cached_branch}[/bold]"
-                )
+                console.print(f"[blue]ℹ[/blue] Using cached main branch: [bold]{cached_branch}[/bold]")
                 return cached_branch
             else:
-                console.print(
-                    f"[yellow]⚠[/yellow] Cached branch '{cached_branch}' no longer exists, detecting..."
-                )
+                console.print(f"[yellow]⚠[/yellow] Cached branch '{cached_branch}' no longer exists, detecting...")
     except Exception:
         pass
 
@@ -153,9 +144,7 @@ def detect_main_branch(repo: git.Repo) -> str | None:
         return selected
 
     # Multiple candidates - prompt user
-    console.print(
-        "[yellow]⚠[/yellow] Multiple potential main branches found. Please select one:"
-    )
+    console.print("[yellow]⚠[/yellow] Multiple potential main branches found. Please select one:")
 
     table = Table(show_header=True, header_style="bold")
     table.add_column("#", style="dim", width=3)
@@ -250,9 +239,7 @@ def switch_to_branch(repo: git.Repo, branch_name: str) -> None:
     local_branches = {h.name: h for h in repo.heads}
     if branch_name in local_branches:
         local_branches[branch_name].checkout()
-        console.print(
-            f"[green]✓[/green] Switched to local branch: [bold]{branch_name}[/bold]"
-        )
+        console.print(f"[green]✓[/green] Switched to local branch: [bold]{branch_name}[/bold]")
         return
 
     # Check if branch exists on remote
@@ -266,9 +253,7 @@ def switch_to_branch(repo: git.Repo, branch_name: str) -> None:
             local_branch.set_tracking_branch(remote_ref)
             local_branch.checkout()
 
-            console.print(
-                f"[green]✓[/green] Created and switched to tracking branch: [bold]{branch_name}[/bold]"
-            )
+            console.print(f"[green]✓[/green] Created and switched to tracking branch: [bold]{branch_name}[/bold]")
             return
     except (AttributeError, IndexError):
         pass
@@ -302,9 +287,7 @@ def main() -> None:
     try:
         current_branch = repo.active_branch.name
         if current_branch == branch_name:
-            console.print(
-                f"[blue]ℹ[/blue] Already on branch: [bold]{branch_name}[/bold]"
-            )
+            console.print(f"[blue]ℹ[/blue] Already on branch: [bold]{branch_name}[/bold]")
             sys.exit(0)
     except TypeError:
         # Detached HEAD state

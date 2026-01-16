@@ -78,7 +78,7 @@ def get_staged_files(repo: git.Repo) -> list[str]:
     """
     try:
         # Check if HEAD exists
-        repo.head.commit
+        _ = repo.head.commit
         staged_diffs = repo.index.diff("HEAD")
     except ValueError:
         # Fresh repo with no HEAD - use diff against empty tree

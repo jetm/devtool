@@ -62,10 +62,11 @@ import shutil
 import socket
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 import tomli
 from claude_agent_sdk import (
@@ -107,7 +108,7 @@ class ACAConfig:
     default_model: str = "sonnet"
 
     @classmethod
-    def load(cls) -> "ACAConfig":
+    def load(cls) -> ACAConfig:
         """Load configuration from file and environment variables."""
         config = cls()
 
@@ -118,13 +119,9 @@ class ACAConfig:
                 with open(config_path, "rb") as f:
                     data = tomli.load(f)
 
-                config.retry_attempts = data.get(
-                    "retry_attempts", config.retry_attempts
-                )
+                config.retry_attempts = data.get("retry_attempts", config.retry_attempts)
                 config.initial_delay = data.get("initial_delay", config.initial_delay)
-                config.backoff_factor = data.get(
-                    "backoff_factor", config.backoff_factor
-                )
+                config.backoff_factor = data.get("backoff_factor", config.backoff_factor)
                 config.max_delay = data.get("max_delay", config.max_delay)
                 config.timeout = data.get("timeout", config.timeout)
                 config.log_level = data.get("log_level", config.log_level)
@@ -174,19 +171,13 @@ def setup_logging(verbose: bool = False) -> None:
         verbose: If True, enables DEBUG level logging.
     """
     config = get_config()
-    level = (
-        logging.DEBUG
-        if verbose
-        else getattr(logging, config.log_level, logging.WARNING)
-    )
+    level = logging.DEBUG if verbose else getattr(logging, config.log_level, logging.WARNING)
 
     # Configure the root logger so all module loggers inherit the configuration
     root_logger = logging.getLogger()
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(
-        logging.Formatter(
-            "[%(asctime)s] %(levelname)s [%(name)s:%(funcName)s:%(lineno)d] %(message)s"
-        )
+        logging.Formatter("[%(asctime)s] %(levelname)s [%(name)s:%(funcName)s:%(lineno)d] %(message)s")
     )
     root_logger.setLevel(level)
     root_logger.addHandler(handler)
@@ -468,9 +459,7 @@ def collect_error_context(
 
     # Check environment (sanitized)
     context.extra["has_api_key"] = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    context.extra["has_credentials_file"] = (
-        Path.home() / ".claude" / ".credentials.json"
-    ).exists()
+    context.extra["has_credentials_file"] = (Path.home() / ".claude" / ".credentials.json").exists()
 
     return context
 
@@ -484,7 +473,7 @@ def check_network_connectivity() -> tuple[bool, str | None]:
     try:
         socket.create_connection(("api.anthropic.com", 443), timeout=5)
         return True, None
-    except socket.timeout:
+    except TimeoutError:
         return False, "Connection timed out"
     except socket.gaierror:
         return False, "DNS resolution failed"
@@ -645,12 +634,8 @@ def retry_with_backoff(
     """
     config = get_config()
     _max_attempts = max_attempts if max_attempts is not None else config.retry_attempts
-    _initial_delay = (
-        initial_delay if initial_delay is not None else config.initial_delay
-    )
-    _backoff_factor = (
-        backoff_factor if backoff_factor is not None else config.backoff_factor
-    )
+    _initial_delay = initial_delay if initial_delay is not None else config.initial_delay
+    _backoff_factor = backoff_factor if backoff_factor is not None else config.backoff_factor
     _max_delay = max_delay if max_delay is not None else config.max_delay
 
     def decorator(func: F) -> F:
@@ -673,14 +658,11 @@ def retry_with_backoff(
                         delay *= 0.5 + random.random()
 
                         logger.warning(
-                            f"Attempt {attempt + 1}/{_max_attempts} failed: {e}. "
-                            f"Retrying in {delay:.1f}s..."
+                            f"Attempt {attempt + 1}/{_max_attempts} failed: {e}. Retrying in {delay:.1f}s..."
                         )
                         await asyncio.sleep(delay)
                     else:
-                        logger.error(
-                            f"All {_max_attempts} attempts failed. Last error: {e}"
-                        )
+                        logger.error(f"All {_max_attempts} attempts failed. Last error: {e}")
                 except (ClaudeAuthenticationError, ClaudeCLIError, ClaudeContentError):
                     # Don't retry these errors
                     raise
@@ -704,8 +686,7 @@ def check_dependency(executable: str, console: Console) -> bool:
     """Check if an executable exists in PATH."""
     if shutil.which(executable) is None:
         console.print(
-            f"[red]Error: '{executable}' not found. "
-            f"Please install {executable} and ensure it's in your PATH.[/red]"
+            f"[red]Error: '{executable}' not found. Please install {executable} and ensure it's in your PATH.[/red]"
         )
         return False
     return True
@@ -725,8 +706,7 @@ def check_claude_cli(console: Console) -> bool:
     # Check if claude command exists
     if shutil.which("claude") is None:
         console.print(
-            "[red]Error: Claude Code CLI not found.[/red]\n"
-            "[yellow]Install it from https://claude.ai/download[/yellow]"
+            "[red]Error: Claude Code CLI not found.[/red]\n[yellow]Install it from https://claude.ai/download[/yellow]"
         )
         return False
 
@@ -752,8 +732,7 @@ def check_claude_cli(console: Console) -> bool:
         return False
     except FileNotFoundError:
         console.print(
-            "[red]Error: Claude Code CLI not found.[/red]\n"
-            "[yellow]Install it from https://claude.ai/download[/yellow]"
+            "[red]Error: Claude Code CLI not found.[/red]\n[yellow]Install it from https://claude.ai/download[/yellow]"
         )
         return False
 
@@ -980,7 +959,7 @@ async def _generate_with_claude_impl(
 
     try:
         await asyncio.wait_for(collect_response(), timeout=_timeout)
-    except asyncio.TimeoutError as e:
+    except TimeoutError as e:
         logger.error(f"Claude query timed out after {_timeout}s")
         raise ClaudeTimeoutError(
             message=f"Claude operation timed out after {_timeout} seconds",
@@ -1010,9 +989,7 @@ async def _generate_with_claude_impl(
 
 
 @retry_with_backoff()
-async def generate_with_claude(
-    prompt: str, cwd: str, timeout: int | None = None, model: str | None = None
-) -> str:
+async def generate_with_claude(prompt: str, cwd: str, timeout: int | None = None, model: str | None = None) -> str:
     """Call Claude Agent SDK to generate content.
 
     Parses the streaming response from Claude Agent SDK, extracting text content

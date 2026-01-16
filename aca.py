@@ -233,9 +233,7 @@ def slugify_branch_name(title: str, max_length: int = 50) -> str:
     return slug
 
 
-def rename_and_push_branch(
-    repo: git.Repo, old_name: str, new_name: str, console: Console
-) -> bool:
+def rename_and_push_branch(repo: git.Repo, old_name: str, new_name: str, console: Console) -> bool:
     """Rename a branch locally and update the remote.
 
     Args:
@@ -252,11 +250,7 @@ def rename_and_push_branch(
         repo.git.rev_parse("--verify", new_name)
         # Branch exists, ask user
         try:
-            confirm = (
-                input(f"Branch '{new_name}' already exists locally. Overwrite? [y/N]: ")
-                .strip()
-                .lower()
-            )
+            confirm = input(f"Branch '{new_name}' already exists locally. Overwrite? [y/N]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             console.print("\nAborted.")
             return False
@@ -336,7 +330,7 @@ def get_target_branch_from_config(repo: git.Repo) -> str | None:
         return None
 
     current_branch = None
-    with open(config_file, "r") as f:
+    with open(config_file) as f:
         for line in f:
             # Match branch section header
             branch_match = re.match(r'^\[branch "(.+)"\]$', line.strip())
@@ -439,9 +433,7 @@ Describe the approach at a conceptual level, not the code changes.
 """
 
 
-def run_precommit_hooks(
-    repo: git.Repo, console: Console, staged_files: list[str]
-) -> tuple[bool, list[str]]:
+def run_precommit_hooks(repo: git.Repo, console: Console, staged_files: list[str]) -> tuple[bool, list[str]]:
     """Run pre-commit hooks on staged files.
 
     Honors SKIP_PRECOMMIT by translating it to pre-commit's native SKIP env var,
@@ -468,17 +460,13 @@ def run_precommit_hooks(
 
     skip_env = get_precommit_skip_env()
     if skip_env:
-        console.print(
-            "[yellow]⚠ Skipping pre-commit hooks (SKIP_PRECOMMIT is set)[/yellow]"
-        )
+        console.print("[yellow]⚠ Skipping pre-commit hooks (SKIP_PRECOMMIT is set)[/yellow]")
         return True, []
 
     # Capture unstaged state BEFORE running hooks so we can detect new changes
     try:
         pre_hook_unstaged_output = repo.git.diff("--name-only")
-        pre_hook_unstaged = {
-            f for f in pre_hook_unstaged_output.split("\n") if f.strip()
-        }
+        pre_hook_unstaged = {f for f in pre_hook_unstaged_output.split("\n") if f.strip()}
     except Exception:
         pre_hook_unstaged = set()
 
@@ -499,9 +487,7 @@ def run_precommit_hooks(
     modified_files: list[str] = []
     try:
         post_hook_unstaged_output = repo.git.diff("--name-only")
-        post_hook_unstaged = {
-            f for f in post_hook_unstaged_output.split("\n") if f.strip()
-        }
+        post_hook_unstaged = {f for f in post_hook_unstaged_output.split("\n") if f.strip()}
 
         # Only flag files that have NEW unstaged changes and were in our staged set
         new_unstaged = post_hook_unstaged - pre_hook_unstaged
@@ -523,9 +509,7 @@ def run_precommit_hooks(
     return False, modified_files
 
 
-def get_mr_template(
-    current_branch: str, target_branch: str, ticket_number: str | None = None
-) -> str:
+def get_mr_template(current_branch: str, target_branch: str, ticket_number: str | None = None) -> str:
     """Get a fallback MR description template.
 
     Args:
@@ -600,18 +584,10 @@ def handle_generation_error(
     if fallback_content:
         console.print()
         if isinstance(error, RETRYABLE_EXCEPTIONS):
-            console.print(
-                "[yellow]This appears to be a transient error. You can retry or use a template.[/yellow]"
-            )
+            console.print("[yellow]This appears to be a transient error. You can retry or use a template.[/yellow]")
 
         try:
-            choice = (
-                input(
-                    "Would you like to (r)etry, use (t)emplate, or (a)bort? [r/t/a]: "
-                )
-                .strip()
-                .lower()
-            )
+            choice = input("Would you like to (r)etry, use (t)emplate, or (a)bort? [r/t/a]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             console.print("\nAborted.")
             sys.exit(0)
@@ -908,18 +884,14 @@ def commit(ctx: click.Context) -> None:
             # Also check for new files
             staged_new = repo.index.diff("HEAD", R=True)
             if not staged_new:
-                print_error(
-                    console, "No staged changes found. Use 'git add' to stage changes."
-                )
+                print_error(console, "No staged changes found. Use 'git add' to stage changes.")
                 sys.exit(1)
     else:
         # No HEAD yet (fresh repo) - check if there are any staged files at all
         # diff against None gives us all staged files
         staged = list(repo.index.diff(None))
         if not staged and not repo.index.entries:
-            print_error(
-                console, "No staged changes found. Use 'git add' to stage changes."
-            )
+            print_error(console, "No staged changes found. Use 'git add' to stage changes.")
             sys.exit(1)
 
     # Collect git context
@@ -945,35 +917,22 @@ def commit(ctx: click.Context) -> None:
 
     # Warn user if hooks will be completely bypassed
     if get_precommit_skip_env():
-        console.print(
-            "[yellow]⚠ Pre-commit hooks will be completely bypassed "
-            "(validation + commit phase)[/yellow]"
-        )
+        console.print("[yellow]⚠ Pre-commit hooks will be completely bypassed (validation + commit phase)[/yellow]")
 
     hooks_passed, modified_files = run_precommit_hooks(repo, console, staged_files)
 
     if not hooks_passed:
-        print_error(
-            console, "Pre-commit hooks failed. Please fix the issues and try again."
-        )
-        console.print(
-            "[yellow]Tip: Set SKIP_PRECOMMIT=1 to bypass hooks temporarily[/yellow]"
-        )
+        print_error(console, "Pre-commit hooks failed. Please fix the issues and try again.")
+        console.print("[yellow]Tip: Set SKIP_PRECOMMIT=1 to bypass hooks temporarily[/yellow]")
         sys.exit(1)
 
     if modified_files:
-        console.print(
-            "\n[yellow bold]⚠ Pre-commit hooks modified files:[/yellow bold]\n"
-        )
+        console.print("\n[yellow bold]⚠ Pre-commit hooks modified files:[/yellow bold]\n")
         for file in modified_files:
             console.print(f"  • {file}")
         console.print()
-        console.print(
-            "[cyan]The following files were automatically formatted or modified by hooks.[/cyan]"
-        )
-        console.print(
-            "[cyan]Please review the changes, stage them, and run 'aca commit' again.[/cyan]"
-        )
+        console.print("[cyan]The following files were automatically formatted or modified by hooks.[/cyan]")
+        console.print("[cyan]Please review the changes, stage them, and run 'aca commit' again.[/cyan]")
         console.print()
         console.print("[dim]Next steps:[/dim]")
         console.print("  1. Review the modified files: git diff")
@@ -1042,9 +1001,7 @@ def commit(ctx: click.Context) -> None:
                 commit_message = edit_in_editor(result, console, ".txt")
                 # Strip comment lines from template
                 commit_message = "\n".join(
-                    line
-                    for line in commit_message.split("\n")
-                    if not line.strip().startswith("#")
+                    line for line in commit_message.split("\n") if not line.strip().startswith("#")
                 ).strip()
                 break
             # User chose retry, continue loop
@@ -1061,9 +1018,7 @@ def commit(ctx: click.Context) -> None:
             if result is not None:
                 commit_message = edit_in_editor(result, console, ".txt")
                 commit_message = "\n".join(
-                    line
-                    for line in commit_message.split("\n")
-                    if not line.strip().startswith("#")
+                    line for line in commit_message.split("\n") if not line.strip().startswith("#")
                 ).strip()
                 break
             # User chose retry, continue loop
@@ -1080,17 +1035,13 @@ def commit(ctx: click.Context) -> None:
             if result is not None:
                 commit_message = edit_in_editor(result, console, ".txt")
                 commit_message = "\n".join(
-                    line
-                    for line in commit_message.split("\n")
-                    if not line.strip().startswith("#")
+                    line for line in commit_message.split("\n") if not line.strip().startswith("#")
                 ).strip()
                 break
 
     if not commit_message:
         print_error(console, "Failed to generate a valid commit message")
-        console.print(
-            "[yellow]Tip: Run 'aca doctor' to check your configuration.[/yellow]"
-        )
+        console.print("[yellow]Tip: Run 'aca doctor' to check your configuration.[/yellow]")
         sys.exit(1)
 
     # Type narrowing for linters/type-checkers.
@@ -1103,11 +1054,7 @@ def commit(ctx: click.Context) -> None:
         console.print()
 
         try:
-            choice = (
-                input("Do you want to (e)dit, (c)ommit, or (a)bort? [e/c/a]: ")
-                .strip()
-                .lower()
-            )
+            choice = input("Do you want to (e)dit, (c)ommit, or (a)bort? [e/c/a]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             console.print("\nAborted.")
             sys.exit(0)
@@ -1134,9 +1081,7 @@ def commit(ctx: click.Context) -> None:
     commit_cmd = ["git", "commit"]
     if should_skip_hooks:
         commit_cmd.append("--no-verify")
-        console.print(
-            "[yellow]⚠ Committing with --no-verify (SKIP_PRECOMMIT is set)[/yellow]"
-        )
+        console.print("[yellow]⚠ Committing with --no-verify (SKIP_PRECOMMIT is set)[/yellow]")
     commit_cmd.extend(["--signoff", "-m", commit_message])
 
     result = subprocess.run(
@@ -1234,9 +1179,7 @@ def mr_desc(ctx: click.Context) -> None:
     # Fall back to upstream tracking ref for current branch
     if not log_range:
         try:
-            upstream = repo.git.rev_parse(
-                "--abbrev-ref", f"{current_branch}@{{upstream}}"
-            )
+            upstream = repo.git.rev_parse("--abbrev-ref", f"{current_branch}@{{upstream}}")
             if upstream:
                 log_range = f"{upstream}..{current_branch}"
                 log_base = upstream
@@ -1280,9 +1223,7 @@ def mr_desc(ctx: click.Context) -> None:
     # Prepare fallback template for graceful degradation
     # Some type-checkers don't narrow Optional args well here; an empty string
     # behaves the same as None for our template logic.
-    fallback_template = get_mr_template(
-        current_branch, target_branch, ticket_number or ""
-    )
+    fallback_template = get_mr_template(current_branch, target_branch, ticket_number or "")
 
     # Generate MR description with retry and fallback support
     mr_content: str | None = None
@@ -1351,9 +1292,7 @@ def mr_desc(ctx: click.Context) -> None:
 
     if not mr_content:
         print_error(console, "Failed to generate MR description")
-        console.print(
-            "[yellow]Tip: Run 'aca doctor' to check your configuration.[/yellow]"
-        )
+        console.print("[yellow]Tip: Run 'aca doctor' to check your configuration.[/yellow]")
         sys.exit(1)
 
     # Type narrowing for linters/type-checkers.
@@ -1366,11 +1305,7 @@ def mr_desc(ctx: click.Context) -> None:
         console.print()
 
         try:
-            choice = (
-                input("Do you want to (e)dit, (c)reate, or (a)bort? [e/c/a]: ")
-                .strip()
-                .lower()
-            )
+            choice = input("Do you want to (e)dit, (c)reate, or (a)bort? [e/c/a]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             console.print("\nAborted.")
             sys.exit(0)
@@ -1429,9 +1364,7 @@ def mr_desc(ctx: click.Context) -> None:
             break
 
     if not title:
-        print_error(
-            console, "Could not parse title from generated content. Please try again."
-        )
+        print_error(console, "Could not parse title from generated content. Please try again.")
         sys.exit(1)
 
     # Type narrowing for linters/type-checkers.
@@ -1455,13 +1388,9 @@ def mr_desc(ctx: click.Context) -> None:
             new_branch_name = f"IOTIL-{ticket_number}"
     else:
         # Prompt user for ticket number if not detected
-        console.print(
-            "[yellow]No IOTIL ticket number detected in branch name.[/yellow]"
-        )
+        console.print("[yellow]No IOTIL ticket number detected in branch name.[/yellow]")
         try:
-            ticket_input = input(
-                "Enter IOTIL ticket number (or press Enter to skip): "
-            ).strip()
+            ticket_input = input("Enter IOTIL ticket number (or press Enter to skip): ").strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\nAborted.")
             sys.exit(0)
@@ -1493,18 +1422,14 @@ def mr_desc(ctx: click.Context) -> None:
             sys.exit(0)
 
         if rename_choice in ("", "y", "yes"):
-            if not rename_and_push_branch(
-                repo, current_branch, new_branch_name, console
-            ):
+            if not rename_and_push_branch(repo, current_branch, new_branch_name, console):
                 print_error(
                     console,
                     "Branch rename failed. You can continue with the current branch "
                     "or abort and fix the issue manually.",
                 )
                 try:
-                    continue_choice = (
-                        input("Continue with current branch? [y/N]: ").strip().lower()
-                    )
+                    continue_choice = input("Continue with current branch? [y/N]: ").strip().lower()
                 except (EOFError, KeyboardInterrupt):
                     console.print("\nAborted.")
                     sys.exit(0)
@@ -1521,7 +1446,7 @@ def mr_desc(ctx: click.Context) -> None:
 
     # Execute glab command (branch has been renamed at this point if user confirmed)
     try:
-        title_str = cast(str, title)
+        title_str = cast("str", title)
         glab_cmd: list[str] = [
             "glab",
             "mr",
@@ -1603,9 +1528,7 @@ def doctor(ctx: click.Context, full: bool, export: bool) -> None:
     console.print("Checking git... ", end="")
     if shutil.which("git"):
         try:
-            result = subprocess.run(
-                ["git", "--version"], capture_output=True, text=True, timeout=10
-            )
+            result = subprocess.run(["git", "--version"], capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 version = result.stdout.strip()
                 console.print(f"[green]✓[/green] {version}")
@@ -1627,9 +1550,7 @@ def doctor(ctx: click.Context, full: bool, export: bool) -> None:
     console.print("Checking glab... ", end="")
     if shutil.which("glab"):
         try:
-            result = subprocess.run(
-                ["glab", "--version"], capture_output=True, text=True, timeout=10
-            )
+            result = subprocess.run(["glab", "--version"], capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 version = result.stdout.strip().split("\n")[0]
                 console.print(f"[green]✓[/green] {version}")
@@ -1652,18 +1573,14 @@ def doctor(ctx: click.Context, full: bool, export: bool) -> None:
     cli_version = None
     if shutil.which("claude"):
         try:
-            result = subprocess.run(
-                ["claude", "--version"], capture_output=True, text=True, timeout=10
-            )
+            result = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 cli_version = result.stdout.strip()
                 console.print(f"[green]✓[/green] {cli_version}")
                 record_check("claude_cli", True, cli_version)
             else:
                 console.print("[red]✗ Failed to get version[/red]")
-                console.print(
-                    "  [yellow]Install from https://claude.ai/download[/yellow]"
-                )
+                console.print("  [yellow]Install from https://claude.ai/download[/yellow]")
                 record_check("claude_cli", False, "Failed to get version")
                 all_passed = False
         except subprocess.TimeoutExpired:
@@ -1694,22 +1611,18 @@ def doctor(ctx: click.Context, full: bool, export: bool) -> None:
         try:
             import json
 
-            with open(credentials_file, "r") as f:
+            with open(credentials_file) as f:
                 creds = json.load(f)
             if creds:
                 console.print("[green]✓[/green] Authenticated (via credentials file)")
                 record_check("authentication", True, "Credentials file")
             else:
-                console.print(
-                    "[yellow]⚠[/yellow] Credentials file exists but appears empty"
-                )
+                console.print("[yellow]⚠[/yellow] Credentials file exists but appears empty")
                 record_check("authentication", False, "Empty credentials file")
                 all_passed = False
         except json.JSONDecodeError:
             console.print("[red]✗ Credentials file is corrupted[/red]")
-            console.print(
-                "  [yellow]Delete ~/.claude/.credentials.json and re-authenticate[/yellow]"
-            )
+            console.print("  [yellow]Delete ~/.claude/.credentials.json and re-authenticate[/yellow]")
             record_check("authentication", False, "Corrupted credentials file")
             all_passed = False
         except Exception as e:
@@ -1747,9 +1660,7 @@ def doctor(ctx: click.Context, full: bool, export: bool) -> None:
         record_check("network", True, "Connected")
     else:
         console.print(f"[red]✗ {network_error}[/red]")
-        console.print(
-            "  [yellow]Check your internet connection and firewall settings[/yellow]"
-        )
+        console.print("  [yellow]Check your internet connection and firewall settings[/yellow]")
         record_check("network", False, network_error or "Unknown error")
         all_passed = False
 
@@ -1812,9 +1723,7 @@ def doctor(ctx: click.Context, full: bool, export: bool) -> None:
         status = "[green]✓[/green]" if is_set else "[dim]○[/dim]"
         console.print(f"  {status} {var_name}: {display_value}")
 
-    diagnostic_info["environment"] = {
-        var_name: ("Set" if is_set else "Not set") for var_name, is_set, _ in env_vars
-    }
+    diagnostic_info["environment"] = {var_name: ("Set" if is_set else "Not set") for var_name, is_set, _ in env_vars}
 
     # Version compatibility info
     if cli_version and sdk_version:
@@ -1836,9 +1745,7 @@ def doctor(ctx: click.Context, full: bool, export: bool) -> None:
         console.print("\n[bold]Live API Test:[/bold]")
         console.print("Testing Claude API with simple query... ", end="")
         try:
-            test_response = asyncio.run(
-                generate_with_claude("Reply with exactly: OK", os.getcwd())
-            )
+            test_response = asyncio.run(generate_with_claude("Reply with exactly: OK", os.getcwd()))
             if "OK" in test_response or len(test_response) > 0:
                 console.print("[green]✓[/green] API responding correctly")
                 record_check("api_test", True, "API responding")
@@ -1869,9 +1776,7 @@ def doctor(ctx: click.Context, full: bool, export: bool) -> None:
     if all_passed:
         console.print("[green]All checks passed![/green]")
     else:
-        console.print(
-            "[yellow]Some checks failed. Review the output above for details.[/yellow]"
-        )
+        console.print("[yellow]Some checks failed. Review the output above for details.[/yellow]")
         sys.exit(1)
 
 

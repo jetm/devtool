@@ -30,10 +30,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from gitlab import Gitlab, GitlabAuthenticationError, GitlabGetError
 from rich.console import Console
 from rich.logging import RichHandler
-
-from gitlab import Gitlab, GitlabAuthenticationError, GitlabGetError
 
 # Setup rich console and logging
 console = Console()
@@ -90,14 +89,10 @@ def get_gitlab_token(cli_token: str | None = None) -> str:
         logger.info("Using GitLab token from --token argument")
         return cli_token
 
-    raise ValueError(
-        "No GitLab token provided. Set GITLAB_TOKEN environment variable or use --token argument"
-    )
+    raise ValueError("No GitLab token provided. Set GITLAB_TOKEN environment variable or use --token argument")
 
 
-def fetch_unresolved_discussions(
-    gl: Gitlab, project_id: int, mr_iid: int
-) -> tuple[list[Any], str, str]:
+def fetch_unresolved_discussions(gl: Gitlab, project_id: int, mr_iid: int) -> tuple[list[Any], str, str]:
     """
     Fetch all unresolved discussion threads from a merge request.
 
@@ -188,10 +183,7 @@ def get_code_context(
         # Find the file in changes
         target_change = None
         for change in changes.get("changes", []):
-            if (
-                change.get("new_path") == file_path
-                or change.get("old_path") == file_path
-            ):
+            if change.get("new_path") == file_path or change.get("old_path") == file_path:
                 target_change = change
                 break
 
@@ -371,21 +363,15 @@ def format_output(
 
         # Code context
         if file_path and line_number:
-            context = get_code_context(
-                gl, project_id, mr_iid, file_path, line_number, is_old_side=is_old_side
-            )
+            context = get_code_context(gl, project_id, mr_iid, file_path, line_number, is_old_side=is_old_side)
             if context["target_line"] is not None:
                 output_lines.append("Code Context:")
                 output_lines.append("-" * 80)
 
-                all_lines = (
-                    context["before_lines"]
-                    + [context["target_line"]]
-                    + context["after_lines"]
-                )
+                all_lines = context["before_lines"] + [context["target_line"]] + context["after_lines"]
                 line_nums = context["line_numbers"]
 
-                for i, (num, line) in enumerate(zip(line_nums, all_lines)):
+                for i, (num, line) in enumerate(zip(line_nums, all_lines, strict=True)):
                     # Mark the target line
                     marker = ">" if i == len(context["before_lines"]) else " "
                     output_lines.append(f"  {marker} {num:4d} | {line}")
@@ -454,15 +440,10 @@ def main() -> None:
     if args.mr_url:
         # --mr-url provided: extract project and MR ID from URL
         if args.project_id or args.project or args.mr_id:
-            parser.error(
-                "--mr-url cannot be used with --project-id, --project, or --mr-id"
-            )
+            parser.error("--mr-url cannot be used with --project-id, --project, or --mr-id")
         parsed = parse_mr_url(args.mr_url)
         if not parsed:
-            parser.error(
-                "Invalid GitLab MR URL format. "
-                "Expected: https://gitlab.com/{project}/-/merge_requests/{id}"
-            )
+            parser.error("Invalid GitLab MR URL format. Expected: https://gitlab.com/{project}/-/merge_requests/{id}")
         project_identifier, mr_id = parsed
     else:
         # Traditional arguments: require project and MR ID
@@ -488,18 +469,14 @@ def main() -> None:
         project_id = project.id
 
         # Fetch unresolved discussions
-        unresolved_threads, project_name, mr_title = fetch_unresolved_discussions(
-            gl, project_id, mr_id
-        )
+        unresolved_threads, project_name, mr_title = fetch_unresolved_discussions(gl, project_id, mr_id)
 
         if not unresolved_threads:
             console.print("[yellow]No unresolved discussion threads found[/yellow]")
             sys.exit(0)
 
         # Format and output
-        output = format_output(
-            project_id, mr_id, unresolved_threads, gl, project_name, mr_title
-        )
+        output = format_output(project_id, mr_id, unresolved_threads, gl, project_name, mr_title)
         if args.output:
             Path(args.output).write_text(output)
             logger.info(f"Output written to {args.output}")
