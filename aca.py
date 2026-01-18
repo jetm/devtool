@@ -1863,8 +1863,14 @@ def commit(ctx: click.Context) -> None:
 
 
 @cli.command("mr-desc")
+@click.option(
+    "--base",
+    type=str,
+    default=None,
+    help="Base commit, branch, or tag to compare against (overrides automatic detection)",
+)
 @click.pass_context
-def mr_desc(ctx: click.Context) -> None:
+def mr_desc(ctx: click.Context, base: str | None) -> None:
     """Generate a merge request description."""
     plain_text = ctx.obj.get("plain_text", False)
     console = get_console(plain_text)
@@ -1917,45 +1923,59 @@ def mr_desc(ctx: click.Context) -> None:
     except git.exc.GitCommandError:
         pass  # Ignore fetch errors
 
-    # Determine the log range - prefer origin/<target_branch> if it exists,
+    # Determine the log range - prefer user-provided base, then origin/<target_branch>,
     # otherwise fall back to local <target_branch> or upstream ref
     log_range = None
     log_base = None
 
-    # Try origin/<target_branch> first
-    try:
-        repo.git.rev_parse("--verify", f"origin/{target_branch}")
-        log_range = f"origin/{target_branch}..{current_branch}"
-        log_base = f"origin/{target_branch}"
-    except git.exc.GitCommandError:
-        pass
-
-    # Fall back to local target branch
-    if not log_range:
+    # Check if user provided a custom base
+    if base:
         try:
-            repo.git.rev_parse("--verify", target_branch)
-            log_range = f"{target_branch}..{current_branch}"
-            log_base = target_branch
+            repo.git.rev_parse("--verify", base)
+            log_range = f"{base}..{current_branch}"
+            log_base = base
+        except git.exc.GitCommandError:
+            print_error(
+                console,
+                f"Invalid base reference '{base}'. Please provide a valid commit hash, branch name, or tag.\n"
+                "Run 'git log --oneline' or 'git branch -a' to see available references.",
+            )
+            sys.exit(1)
+    else:
+        # Try origin/<target_branch> first
+        try:
+            repo.git.rev_parse("--verify", f"origin/{target_branch}")
+            log_range = f"origin/{target_branch}..{current_branch}"
+            log_base = f"origin/{target_branch}"
         except git.exc.GitCommandError:
             pass
 
-    # Fall back to upstream tracking ref for current branch
-    if not log_range:
-        try:
-            upstream = repo.git.rev_parse("--abbrev-ref", f"{current_branch}@{{upstream}}")
-            if upstream:
-                log_range = f"{upstream}..{current_branch}"
-                log_base = upstream
-        except git.exc.GitCommandError:
-            pass
+        # Fall back to local target branch
+        if not log_range:
+            try:
+                repo.git.rev_parse("--verify", target_branch)
+                log_range = f"{target_branch}..{current_branch}"
+                log_base = target_branch
+            except git.exc.GitCommandError:
+                pass
 
-    if not log_range:
-        print_error(
-            console,
-            f"Could not find a valid base ref. Neither 'origin/{target_branch}', "
-            f"'{target_branch}', nor an upstream tracking branch exists.",
-        )
-        sys.exit(1)
+        # Fall back to upstream tracking ref for current branch
+        if not log_range:
+            try:
+                upstream = repo.git.rev_parse("--abbrev-ref", f"{current_branch}@{{upstream}}")
+                if upstream:
+                    log_range = f"{upstream}..{current_branch}"
+                    log_base = upstream
+            except git.exc.GitCommandError:
+                pass
+
+        if not log_range:
+            print_error(
+                console,
+                f"Could not find a valid base ref. Neither 'origin/{target_branch}', "
+                f"'{target_branch}', nor an upstream tracking branch exists.",
+            )
+            sys.exit(1)
 
     # Get commits between branches
     try:
