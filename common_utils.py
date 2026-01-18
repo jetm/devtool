@@ -110,7 +110,11 @@ class ACAConfig:
     diff_size_threshold_bytes: int = 50_000  # 50KB
     diff_files_threshold: int = 100
     diff_compression_enabled: bool = True
-    diff_compression_strategy: str = "compact"  # Options: "stat", "compact", "filtered", "function-context"
+    diff_compression_strategy: str = "compact"  # Options: "stat", "compact", "filtered", "function-context", "smart"
+    # Smart compression settings
+    diff_max_priority_files: int = 15  # Maximum files with full diff in smart compression
+    diff_token_limit: int = 100_000  # Maximum character count for compressed diff output
+    diff_smart_priority_enabled: bool = True  # Enable smart file prioritization
 
     @classmethod
     def load(cls) -> ACAConfig:
@@ -139,7 +143,7 @@ class ACAConfig:
                 config.diff_files_threshold = data.get("diff_files_threshold", config.diff_files_threshold)
                 config.diff_compression_enabled = data.get("diff_compression_enabled", config.diff_compression_enabled)
                 # Load compression strategy with validation
-                valid_strategies = {"stat", "compact", "filtered", "function-context"}
+                valid_strategies = {"stat", "compact", "filtered", "function-context", "smart"}
                 strategy = data.get("diff_compression_strategy", config.diff_compression_strategy)
                 if strategy in valid_strategies:
                     config.diff_compression_strategy = strategy
@@ -148,6 +152,12 @@ class ACAConfig:
                         f"Invalid diff_compression_strategy '{strategy}' in config, "
                         f"using default 'compact'. Valid options: {valid_strategies}"
                     )
+                # Smart compression settings
+                config.diff_max_priority_files = data.get("diff_max_priority_files", config.diff_max_priority_files)
+                config.diff_token_limit = data.get("diff_token_limit", config.diff_token_limit)
+                config.diff_smart_priority_enabled = data.get(
+                    "diff_smart_priority_enabled", config.diff_smart_priority_enabled
+                )
             except Exception as e:
                 logger.warning(f"Failed to load config file {config_path}: {e}")
 
@@ -192,7 +202,7 @@ class ACAConfig:
             )
 
         if env_strategy := os.environ.get("ACA_DIFF_COMPRESSION_STRATEGY"):
-            valid_strategies = {"stat", "compact", "filtered", "function-context"}
+            valid_strategies = {"stat", "compact", "filtered", "function-context", "smart"}
             if env_strategy in valid_strategies:
                 config.diff_compression_strategy = env_strategy
             else:
@@ -200,6 +210,41 @@ class ACAConfig:
                     f"Invalid ACA_DIFF_COMPRESSION_STRATEGY '{env_strategy}', "
                     f"using default 'compact'. Valid options: {valid_strategies}"
                 )
+
+        # Smart compression environment variable overrides
+        if env_max_priority := os.environ.get("ACA_DIFF_MAX_PRIORITY_FILES"):
+            try:
+                config.diff_max_priority_files = int(env_max_priority)
+            except ValueError:
+                logger.warning(f"Invalid ACA_DIFF_MAX_PRIORITY_FILES value: {env_max_priority}")
+
+        if env_token_limit := os.environ.get("ACA_DIFF_TOKEN_LIMIT"):
+            try:
+                config.diff_token_limit = int(env_token_limit)
+            except ValueError:
+                logger.warning(f"Invalid ACA_DIFF_TOKEN_LIMIT value: {env_token_limit}")
+
+        if env_smart_priority := os.environ.get("ACA_DIFF_SMART_PRIORITY_ENABLED"):
+            config.diff_smart_priority_enabled = env_smart_priority.lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+
+        # Validate smart compression settings
+        if config.diff_max_priority_files < 1 or config.diff_max_priority_files > 50:
+            logger.warning(
+                f"diff_max_priority_files={config.diff_max_priority_files} outside valid range [1, 50], "
+                f"clamping to valid range"
+            )
+            config.diff_max_priority_files = max(1, min(50, config.diff_max_priority_files))
+
+        if config.diff_token_limit < 10_000:
+            logger.warning(
+                f"diff_token_limit={config.diff_token_limit} too small (minimum 10000), using default 100000"
+            )
+            config.diff_token_limit = 100_000
 
         return config
 
