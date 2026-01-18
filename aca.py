@@ -630,6 +630,258 @@ def should_compress_diff(diff_size: dict[str, int], config: ACAConfig) -> bool:
     return diff_size["bytes"] > config.diff_size_threshold_bytes or diff_size["files"] > config.diff_files_threshold
 
 
+# Compression strategy exclusion patterns
+COMPRESSION_EXCLUDE_PATTERNS: set[str] = {
+    # Binary files
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.ico",
+    "*.webp",
+    "*.svg",
+    "*.pdf",
+    "*.woff",
+    "*.woff2",
+    "*.ttf",
+    "*.eot",
+    "*.otf",
+    "*.zip",
+    "*.tar",
+    "*.gz",
+    "*.bz2",
+    "*.7z",
+    "*.rar",
+    "*.exe",
+    "*.dll",
+    "*.so",
+    "*.dylib",
+    "*.bin",
+    # Lock files
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "Cargo.lock",
+    "poetry.lock",
+    "Gemfile.lock",
+    "composer.lock",
+    "Pipfile.lock",
+    "uv.lock",
+    # Minified files
+    "*.min.js",
+    "*.min.css",
+    "*.bundle.js",
+    "*.bundle.css",
+    # Generated files
+    "*-generated.*",
+    "*.pb.go",
+    "*.pb.h",
+    "*.pb.cc",
+    "*.pb.py",
+    "*.g.dart",
+    "*.freezed.dart",
+    "*.generated.ts",
+}
+
+# Valid compression strategies
+VALID_COMPRESSION_STRATEGIES: set[str] = {"stat", "compact", "filtered", "function-context"}
+
+
+def compress_diff_stat(repo: git.Repo) -> str:
+    """Compress diff using statistical summary (--stat format).
+
+    Most aggressive compression. Shows only file names and change counts.
+    Best for: 100+ file changes, massive refactors.
+
+    Args:
+        repo: Git repository object
+
+    Returns:
+        Statistical summary of staged changes
+    """
+    result = repo.git.diff("--cached", "--stat")
+    return result if result else "No changes staged"
+
+
+def compress_diff_compact(repo: git.Repo) -> str:
+    """Compress diff using minimal context (-U1 format).
+
+    Provides 1 line of context around changes instead of default 3.
+    Best for: 50-100 files, mixed changes.
+
+    Args:
+        repo: Git repository object
+
+    Returns:
+        Compact diff with minimal context
+    """
+    result = repo.git.diff("--cached", "--compact-summary", "-U1")
+    return result if result else "No changes staged"
+
+
+def compress_diff_filtered(repo: git.Repo) -> tuple[str, int, int]:
+    """Compress diff by excluding generated and binary files.
+
+    Filters out lock files, minified files, generated code, and binary files.
+    Binary files are detected via git numstat (they show '-' for insertions/deletions).
+    Best for: Repos with many generated assets.
+
+    Args:
+        repo: Git repository object
+
+    Returns:
+        Tuple of (filtered diff, files included, files excluded)
+    """
+    import fnmatch
+
+    # Get list of all staged files
+    all_files = repo.git.diff("--cached", "--name-only").splitlines()
+    if not all_files:
+        return "No changes staged", 0, 0
+
+    # Detect binary files using numstat
+    # Binary files show "-" for insertions and deletions in numstat output
+    binary_files: set[str] = set()
+    numstat_output = repo.git.diff("--cached", "--numstat").splitlines()
+    for line in numstat_output:
+        parts = line.split("\t")
+        if len(parts) >= 3:
+            insertions, deletions, filepath = parts[0], parts[1], parts[2]
+            # Binary files show "-" for both insertions and deletions
+            if insertions == "-" and deletions == "-":
+                binary_files.add(filepath)
+
+    # Filter files based on exclusion patterns and binary detection
+    included_files: list[str] = []
+    excluded_files: list[str] = []
+
+    for filepath in all_files:
+        # Exclude binary files first
+        if filepath in binary_files:
+            excluded_files.append(filepath)
+            continue
+
+        filename = filepath.split("/")[-1]  # Get basename
+        excluded = False
+        for pattern in COMPRESSION_EXCLUDE_PATTERNS:
+            if fnmatch.fnmatch(filename, pattern) or fnmatch.fnmatch(filepath, pattern):
+                excluded = True
+                break
+        if excluded:
+            excluded_files.append(filepath)
+        else:
+            included_files.append(filepath)
+
+    if not included_files:
+        # All files were excluded, return stat summary instead
+        stat_summary = repo.git.diff("--cached", "--stat")
+        return f"All files matched exclusion patterns. Summary:\n{stat_summary}", 0, len(excluded_files)
+
+    # Get diff only for included files
+    result = repo.git.diff("--cached", "--", *included_files)
+    return result if result else "No changes in included files", len(included_files), len(excluded_files)
+
+
+def compress_diff_function_context(repo: git.Repo) -> str:
+    """Compress diff using function context format.
+
+    Shows complete functions/classes where changes occurred.
+    Best for: 20-50 files, focused changes requiring semantic context.
+
+    Args:
+        repo: Git repository object
+
+    Returns:
+        Diff with full function context
+    """
+    result = repo.git.diff("--cached", "--function-context")
+    return result if result else "No changes staged"
+
+
+def apply_compression_strategy(repo: git.Repo, strategy: str, original_diff: str) -> tuple[str, dict[str, int | str]]:
+    """Apply the specified compression strategy to the diff.
+
+    Args:
+        repo: Git repository object
+        strategy: Compression strategy name ("stat", "compact", "filtered", "function-context")
+        original_diff: The original full diff output
+
+    Returns:
+        Tuple of (compressed_diff, compression_info dict)
+        compression_info contains: strategy, original_size, compressed_size, files_included, files_excluded
+    """
+    original_size = len(original_diff.encode("utf-8"))
+    files_included = 0
+    files_excluded = 0
+
+    try:
+        match strategy:
+            case "stat":
+                compressed_diff = compress_diff_stat(repo)
+            case "compact":
+                compressed_diff = compress_diff_compact(repo)
+            case "filtered":
+                compressed_diff, files_included, files_excluded = compress_diff_filtered(repo)
+            case "function-context":
+                compressed_diff = compress_diff_function_context(repo)
+            case _:
+                # Unknown strategy, fall back to compact
+                logger.warning(f"Unknown compression strategy '{strategy}', falling back to 'compact'")
+                compressed_diff = compress_diff_compact(repo)
+                strategy = "compact"
+
+        compressed_size = len(compressed_diff.encode("utf-8"))
+
+        compression_info: dict[str, int | str] = {
+            "strategy": strategy,
+            "original_size": original_size,
+            "compressed_size": compressed_size,
+            "files_included": files_included,
+            "files_excluded": files_excluded,
+        }
+
+        return compressed_diff, compression_info
+
+    except git.GitCommandError as e:
+        logger.error(f"Git command failed during compression: {e}")
+        # Fall back to original diff on error
+        return original_diff, {
+            "strategy": "none",
+            "original_size": original_size,
+            "compressed_size": original_size,
+            "files_included": 0,
+            "files_excluded": 0,
+        }
+
+
+def format_compression_info(info: dict[str, int | str]) -> str:
+    """Format compression info for user display.
+
+    Args:
+        info: Compression info dictionary from apply_compression_strategy()
+
+    Returns:
+        Formatted string showing compression statistics
+    """
+    strategy = info["strategy"]
+    original_kb = int(info["original_size"]) / 1024
+    compressed_kb = int(info["compressed_size"]) / 1024
+
+    if int(info["original_size"]) > 0:
+        reduction_pct = (1 - int(info["compressed_size"]) / int(info["original_size"])) * 100
+    else:
+        reduction_pct = 0
+
+    result = (
+        f"Strategy: {strategy} | Size: {original_kb:.1f} KB → {compressed_kb:.1f} KB ({reduction_pct:.0f}% reduction)"
+    )
+
+    if strategy == "filtered" and (info["files_included"] or info["files_excluded"]):
+        result += f" | Files: {info['files_included']}/{info['files_included'] + info['files_excluded']} included"
+
+    return result
+
+
 def get_mr_template(current_branch: str, target_branch: str, ticket_number: str | None = None) -> str:
     """Get a fallback MR description template.
 
@@ -841,6 +1093,17 @@ Body:
 - Wrap text strictly at 72 characters
 - Separate the subject from the body with a blank line
 - Use the imperative mood throughout
+
+### Diff Format
+
+The diff may be provided in one of these formats:
+- **Full diff**: Complete unified diff with all changes
+- **Statistical summary** (`--stat`): File-level summary showing files changed and line counts
+- **Compact diff** (`-U1`): Minimal context (1 line) around changes
+- **Filtered diff**: Source files only, excluding generated/binary files
+- **Function context**: Complete functions/classes where changes occurred
+
+Regardless of format, focus on understanding WHAT changed to explain WHY it changed.
 
 ### Content & Logic (Focus on WHY, not WHAT)
 
@@ -1066,14 +1329,22 @@ def commit(ctx: click.Context) -> None:
         sys.exit(1)
     check_version_compatibility(console)
 
-    # Check diff size and warn user if compression will be applied
-    # Compression strategies are implemented in subsequent phases
+    # Check diff size and apply compression if needed
     diff_size = calculate_diff_size(diff_output, repo)
     diff_stats = extract_diff_statistics(repo)
     config = get_config()
     needs_compression = should_compress_diff(diff_size, config)
 
-    if needs_compression and config.diff_compression_enabled:
+    # Variables for prompt building
+    final_diff = diff_output
+    compression_info: dict[str, int | str] | None = None
+    diff_format_note = ""
+
+    # Feature gate: compression in commit phase
+    # This flag allows the subsequent phase to extend compression without conflicts
+    compression_commit_phase_enabled = config.diff_compression_enabled
+
+    if needs_compression and compression_commit_phase_enabled:
         size_kb = diff_size["bytes"] / 1024
         threshold_kb = config.diff_size_threshold_bytes / 1024
         console.print()
@@ -1082,9 +1353,25 @@ def commit(ctx: click.Context) -> None:
         console.print(f"Size: {size_kb:.1f} KB, Files: {diff_size['files']}, Lines: {diff_size['lines']}")
         console.print(f"Changes: +{diff_stats['insertions']} -{diff_stats['deletions']}")
         console.print()
-        console.print("Diff compression will be applied to reduce prompt size.")
+
+        # Apply compression strategy
+        strategy = config.diff_compression_strategy
+        final_diff, compression_info = apply_compression_strategy(repo, strategy, diff_output)
+
+        # Display compression results
+        compression_summary = format_compression_info(compression_info)
+        console.print(f"Compression applied: {compression_summary}")
         console.print(f"Thresholds: {threshold_kb:.0f} KB or {config.diff_files_threshold} files")
         console.print()
+
+        # Add note to prompt about diff format only if compression was actually applied
+        actual_strategy = str(compression_info["strategy"])
+        if actual_strategy != "none":
+            original_kb = int(compression_info["original_size"]) / 1024
+            compressed_kb = int(compression_info["compressed_size"]) / 1024
+            diff_format_note = (
+                f"\n**Diff format:** {actual_strategy} (compressed from {original_kb:.1f} KB to {compressed_kb:.1f} KB)"
+            )
     else:
         logger.debug(f"Diff size within limits: {diff_size['bytes'] / 1024:.1f} KB, {diff_size['files']} files")
 
@@ -1097,8 +1384,8 @@ def commit(ctx: click.Context) -> None:
 - Branch: {branch_name}
 - Ticket: {ticket_number or "none"}
 
-## Staged Changes Diff
-{diff_output}
+## Staged Changes Diff{diff_format_note}
+{final_diff}
 """
 
     # Prepare fallback template for graceful degradation

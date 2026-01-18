@@ -110,6 +110,7 @@ class ACAConfig:
     diff_size_threshold_bytes: int = 50_000  # 50KB
     diff_files_threshold: int = 100
     diff_compression_enabled: bool = True
+    diff_compression_strategy: str = "compact"  # Options: "stat", "compact", "filtered", "function-context"
 
     @classmethod
     def load(cls) -> ACAConfig:
@@ -137,6 +138,16 @@ class ACAConfig:
                 )
                 config.diff_files_threshold = data.get("diff_files_threshold", config.diff_files_threshold)
                 config.diff_compression_enabled = data.get("diff_compression_enabled", config.diff_compression_enabled)
+                # Load compression strategy with validation
+                valid_strategies = {"stat", "compact", "filtered", "function-context"}
+                strategy = data.get("diff_compression_strategy", config.diff_compression_strategy)
+                if strategy in valid_strategies:
+                    config.diff_compression_strategy = strategy
+                else:
+                    logger.warning(
+                        f"Invalid diff_compression_strategy '{strategy}' in config, "
+                        f"using default 'compact'. Valid options: {valid_strategies}"
+                    )
             except Exception as e:
                 logger.warning(f"Failed to load config file {config_path}: {e}")
 
@@ -179,6 +190,16 @@ class ACAConfig:
                 "yes",
                 "on",
             )
+
+        if env_strategy := os.environ.get("ACA_DIFF_COMPRESSION_STRATEGY"):
+            valid_strategies = {"stat", "compact", "filtered", "function-context"}
+            if env_strategy in valid_strategies:
+                config.diff_compression_strategy = env_strategy
+            else:
+                logger.warning(
+                    f"Invalid ACA_DIFF_COMPRESSION_STRATEGY '{env_strategy}', "
+                    f"using default 'compact'. Valid options: {valid_strategies}"
+                )
 
         return config
 
