@@ -45,6 +45,15 @@ Environment variable overrides:
     ACA_DIFF_MAX_PRIORITY_FILES       - Max priority files for smart compression
     ACA_DIFF_TOKEN_LIMIT              - Token limit for smart compression
     ACA_DIFF_SMART_PRIORITY_ENABLED   - Enable smart prioritization (1/true/yes/on)
+
+Debugging flags (for commit command):
+    --no-compress     Disable compression for this commit (overrides config/env)
+    --show-prompt     Display the full prompt before sending to Claude
+
+Troubleshooting:
+    - Use `aca commit --show-prompt` to inspect the exact prompt sent to Claude
+    - Use `aca commit --no-compress` to test without compression
+    - Use `aca doctor` to validate compression configuration and test compression
 """
 
 import asyncio
@@ -79,6 +88,8 @@ from common_utils import (
     check_dependency,
     check_network_connectivity,
     check_version_compatibility,
+    cleanup_temp_prompt_file,
+    create_file_based_prompt,
     generate_with_claude,
     generate_with_progress,
     get_config,
@@ -87,6 +98,7 @@ from common_utils import (
     print_error,
     print_output,
     setup_logging,
+    should_use_file_based_prompt,
 )
 
 # Configure module logger
@@ -1707,8 +1719,18 @@ def cli(ctx: click.Context, plain_text: bool, verbose: bool) -> None:
 
 
 @cli.command()
+@click.option(
+    "--no-compress",
+    is_flag=True,
+    help="Disable compression for this commit (overrides config/env)",
+)
+@click.option(
+    "--show-prompt",
+    is_flag=True,
+    help="Display the full prompt before sending to Claude",
+)
 @click.pass_context
-def commit(ctx: click.Context) -> None:
+def commit(ctx: click.Context, no_compress: bool, show_prompt: bool) -> None:
     """Generate a commit message for staged changes."""
     plain_text = ctx.obj.get("plain_text", False)
     console = get_console(plain_text)
@@ -1811,7 +1833,12 @@ def commit(ctx: click.Context) -> None:
 
     # Feature gate: compression in commit phase
     # This flag allows the subsequent phase to extend compression without conflicts
-    compression_commit_phase_enabled = config.diff_compression_enabled
+    # Override with --no-compress flag
+    compression_commit_phase_enabled = config.diff_compression_enabled and not no_compress
+
+    # Notify user if compression is disabled via flag
+    if no_compress and config.diff_compression_enabled:
+        console.print("[yellow]⚠ Compression disabled via --no-compress flag[/yellow]")
 
     if needs_compression and compression_commit_phase_enabled:
         size_kb = diff_size["bytes"] / 1024
@@ -2001,6 +2028,70 @@ def commit(ctx: click.Context) -> None:
     else:
         logger.debug(f"Prompt size within limits: {prompt_size_kb:.1f} KB")
 
+    # Check if file-based delivery will be used
+    will_use_file_based = config.prompt_file_enabled and should_use_file_based_prompt(prompt, config)
+
+    # Notify about file-based delivery for large prompts
+    if will_use_file_based:
+        console.print(
+            f"[dim]File-based prompt delivery will be used for this large diff ({prompt_size_kb:.1f} KB)[/dim]"
+        )
+
+    # Pre-create file-based prompt if --show-prompt is set and file-based delivery will be used
+    # This ensures the preview shows the actual prompt that will be sent to Claude
+    prepared_prompt: str | None = None
+    prepared_temp_file: str | None = None
+
+    if show_prompt and will_use_file_based:
+        file_result = create_file_based_prompt(
+            prompt,
+            section_marker="## Staged Changes Diff",
+            target_dir=str(repo.working_dir),
+        )
+        if file_result is not None:
+            prepared_prompt, prepared_temp_file = file_result
+            logger.debug(f"Pre-created file-based prompt for --show-prompt preview: {prepared_temp_file}")
+
+    # Determine which prompt to show in preview
+    display_prompt = prepared_prompt if prepared_prompt is not None else prompt
+    display_size_bytes = len(display_prompt.encode("utf-8"))
+    display_size_kb = display_size_bytes / 1024
+
+    # Handle --show-prompt flag: display prompt and ask for confirmation
+    if show_prompt:
+        console.print()
+        console.print("[bold]═══════════════════════════════════════════════════════════════════[/bold]")
+        console.print("[bold]PROMPT PREVIEW[/bold]")
+        if prepared_prompt is not None:
+            console.print(f"[dim]Size: {display_size_kb:.1f} KB ({display_size_bytes:,} characters)[/dim]")
+            console.print(
+                "[yellow]Note: File-based delivery active. Diff content is in the temp file shown below.[/yellow]"
+            )
+        else:
+            console.print(f"[dim]Size: {prompt_size_kb:.1f} KB ({prompt_size_bytes:,} characters)[/dim]")
+        console.print("[bold]═══════════════════════════════════════════════════════════════════[/bold]")
+        console.print()
+        console.print(display_prompt)
+        console.print()
+        console.print("[bold]═══════════════════════════════════════════════════════════════════[/bold]")
+        console.print()
+
+        try:
+            confirm = input("Send this prompt to Claude? [y/n]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            # Clean up temp file on abort
+            if prepared_temp_file is not None:
+                cleanup_temp_prompt_file(prepared_temp_file)
+            console.print("\nAborted.")
+            sys.exit(0)
+
+        if confirm not in ("y", "yes"):
+            # Clean up temp file on abort
+            if prepared_temp_file is not None:
+                cleanup_temp_prompt_file(prepared_temp_file)
+            console.print("Aborted.")
+            sys.exit(0)
+
     # Prepare fallback template for graceful degradation
     # Note: This template is compression-agnostic and doesn't include diff content,
     # so it works regardless of whether compression was applied or failed
@@ -2010,13 +2101,24 @@ def commit(ctx: click.Context) -> None:
     commit_message: str | None = None
     max_generation_attempts = 3  # Allow user to retry generation
 
+    # Use prepared prompt if available (from --show-prompt flow), otherwise use original
+    generation_prompt = prepared_prompt if prepared_prompt is not None else prompt
+    # Skip automatic file-based delivery if we already prepared the prompt
+    skip_auto_file_delivery = prepared_prompt is not None
+
+    # Helper to clean up the prepared temp file
+    def cleanup_prepared_file() -> None:
+        if prepared_temp_file is not None:
+            cleanup_temp_prompt_file(prepared_temp_file)
+
     for generation_attempt in range(max_generation_attempts):
         try:
             raw_response = generate_with_progress(
                 console,
-                prompt,
+                generation_prompt,
                 str(repo.working_dir),
                 message="Generating commit message...",
+                skip_file_based_delivery=skip_auto_file_delivery,
             )
             commit_message = extract_commit_message(raw_response)
             if commit_message:
@@ -2030,6 +2132,7 @@ def commit(ctx: click.Context) -> None:
                 console.print(e.format_error())
             else:
                 console.print(f"[red]{e.format_error()}[/red]")
+            cleanup_prepared_file()
             sys.exit(1)
 
         except (ClaudeNetworkError, ClaudeTimeoutError, ClaudeRateLimitError) as e:
@@ -2060,6 +2163,39 @@ def commit(ctx: click.Context) -> None:
 
         except (ClaudeCLIError, ClaudeContentError) as e:
             # Non-transient errors: offer fallback but no automatic retry
+            # Check for "Argument list too long" error which indicates ARG_MAX exceeded
+            error_str = str(e)
+            if "Argument list too long" in error_str or (hasattr(e, "cause") and "E2BIG" in str(e.cause)):
+                logger.error(
+                    f"ARG_MAX exceeded error: {e} "
+                    f"[prompt_size: {prompt_size_kb:.1f}KB, file_delivery: {config.prompt_file_enabled}]"
+                )
+                console.print()
+                console.print("[red bold]Error: Prompt too large for command-line delivery[/red bold]")
+                console.print()
+                console.print(
+                    "[yellow]The diff is too large to pass to Claude via command-line arguments. "
+                    "This is a known limitation of the Claude Agent SDK.[/yellow]"
+                )
+                console.print()
+                console.print("[bold]Possible solutions:[/bold]")
+                console.print("  1. Ensure file-based delivery is enabled: ACA_PROMPT_FILE_ENABLED=true")
+                console.print("  2. Use a more aggressive compression strategy: ACA_DIFF_COMPRESSION_STRATEGY=stat")
+                console.print("  3. Stage fewer files and commit in smaller batches")
+                console.print()
+                if not config.prompt_file_enabled:
+                    console.print(
+                        "[cyan]File-based delivery is currently DISABLED. "
+                        "Enable it with: ACA_PROMPT_FILE_ENABLED=true[/cyan]"
+                    )
+                else:
+                    console.print(
+                        "[dim]File-based delivery is enabled but may have failed. "
+                        "Check logs with ACA_LOG_LEVEL=DEBUG for details.[/dim]"
+                    )
+                cleanup_prepared_file()
+                sys.exit(1)
+
             # Include compression context in error logs for diagnostics
             if compression_info is not None and str(compression_info.get("strategy", "none")) != "none":
                 logger.error(
@@ -2085,6 +2221,44 @@ def commit(ctx: click.Context) -> None:
                 ).strip()
                 break
             # User chose retry, continue loop
+
+        except OSError as e:
+            # Handle ARG_MAX (Argument list too long) errors specifically
+            import errno
+
+            if e.errno == errno.E2BIG or "Argument list too long" in str(e):
+                logger.error(
+                    f"ARG_MAX exceeded (OSError): {e} "
+                    f"[prompt_size: {prompt_size_kb:.1f}KB, file_delivery: {config.prompt_file_enabled}]"
+                )
+                console.print()
+                console.print("[red bold]Error: Prompt too large for command-line delivery[/red bold]")
+                console.print()
+                console.print(
+                    "[yellow]The diff is too large to pass to Claude via command-line arguments. "
+                    "This is a known limitation of the Claude Agent SDK.[/yellow]"
+                )
+                console.print()
+                console.print("[bold]Possible solutions:[/bold]")
+                console.print("  1. Ensure file-based delivery is enabled: ACA_PROMPT_FILE_ENABLED=true")
+                console.print("  2. Use a more aggressive compression strategy: ACA_DIFF_COMPRESSION_STRATEGY=stat")
+                console.print("  3. Stage fewer files and commit in smaller batches")
+                console.print()
+                if not config.prompt_file_enabled:
+                    console.print(
+                        "[cyan]File-based delivery is currently DISABLED. "
+                        "Enable it with: ACA_PROMPT_FILE_ENABLED=true[/cyan]"
+                    )
+                else:
+                    console.print(
+                        "[dim]File-based delivery is enabled but may have failed. "
+                        "Check logs with ACA_LOG_LEVEL=DEBUG for details.[/dim]"
+                    )
+                cleanup_prepared_file()
+                sys.exit(1)
+            else:
+                # Re-raise other OSErrors
+                raise
 
         except Exception as e:
             # Unexpected errors: log and offer fallback
@@ -2112,6 +2286,9 @@ def commit(ctx: click.Context) -> None:
                     line for line in commit_message.split("\n") if not line.strip().startswith("#")
                 ).strip()
                 break
+
+    # Clean up the prepared temp file after generation loop completes
+    cleanup_prepared_file()
 
     if not commit_message:
         print_error(console, "Failed to generate a valid commit message")
@@ -2340,6 +2517,7 @@ def mr_desc(ctx: click.Context, base: str | None) -> None:
                 prompt,
                 str(repo.working_dir),
                 message="Generating merge request description...",
+                section_marker="## Commits",  # Use commits section for file-based delivery
             )
             break  # Success, exit retry loop
 
@@ -2611,6 +2789,7 @@ def doctor(ctx: click.Context, full: bool, export: bool) -> None:
     - claude-agent-sdk version
     - Network connectivity to Anthropic API
     - Configuration file validity
+    - Diff compression configuration and simulation
     - Environment variables
 
     Use --full to also test the actual Claude API with a simple query.
@@ -2799,6 +2978,344 @@ def doctor(ctx: click.Context, full: bool, export: bool) -> None:
         console.print(f"    Timeout: {config.timeout}s (default)")
         console.print(f"    Retry attempts: {config.retry_attempts} (default)")
 
+    # Diff Compression Configuration section
+    console.print("\n[bold]Diff Compression Configuration:[/bold]")
+    config = get_config()
+    compression_checks_passed = True
+
+    # Valid strategies
+    valid_strategies = {"stat", "compact", "filtered", "function-context", "smart"}
+
+    # Check diff_compression_enabled
+    status = "[green]✓[/green]" if config.diff_compression_enabled else "[dim]○[/dim]"
+    enabled_str = "enabled" if config.diff_compression_enabled else "disabled"
+    console.print(f"  {status} Compression: {enabled_str}")
+
+    # Check diff_compression_strategy
+    strategy_valid = config.diff_compression_strategy in valid_strategies
+    if strategy_valid:
+        console.print(f"  [green]✓[/green] Strategy: {config.diff_compression_strategy}")
+    else:
+        console.print(f"  [red]✗[/red] Strategy: {config.diff_compression_strategy} (invalid)")
+        console.print(f"    [yellow]Valid options: {', '.join(sorted(valid_strategies))}[/yellow]")
+        compression_checks_passed = False
+
+    # Check diff_size_threshold_bytes
+    size_threshold_kb = config.diff_size_threshold_bytes / 1024
+    if config.diff_size_threshold_bytes > 0:
+        if config.diff_size_threshold_bytes < 1024:  # Less than 1KB
+            console.print(f"  [yellow]⚠[/yellow] Size threshold: {size_threshold_kb:.1f} KB (very low)")
+        else:
+            console.print(f"  [green]✓[/green] Size threshold: {size_threshold_kb:.0f} KB")
+    else:
+        console.print(f"  [red]✗[/red] Size threshold: {size_threshold_kb:.0f} KB (must be > 0)")
+        compression_checks_passed = False
+
+    # Check diff_files_threshold
+    if config.diff_files_threshold > 0:
+        if config.diff_files_threshold < 5:
+            console.print(f"  [yellow]⚠[/yellow] Files threshold: {config.diff_files_threshold} (very low)")
+        else:
+            console.print(f"  [green]✓[/green] Files threshold: {config.diff_files_threshold}")
+    else:
+        console.print(f"  [red]✗[/red] Files threshold: {config.diff_files_threshold} (must be > 0)")
+        compression_checks_passed = False
+
+    # Check diff_max_priority_files (for smart strategy)
+    if 1 <= config.diff_max_priority_files <= 50:
+        console.print(f"  [green]✓[/green] Max priority files: {config.diff_max_priority_files}")
+    else:
+        console.print(f"  [red]✗[/red] Max priority files: {config.diff_max_priority_files} (must be 1-50)")
+        compression_checks_passed = False
+
+    # Check diff_token_limit
+    token_limit_kb = config.diff_token_limit / 1024
+    if config.diff_token_limit >= 10_000:
+        console.print(f"  [green]✓[/green] Token limit: {token_limit_kb:.0f} KB")
+    else:
+        console.print(f"  [red]✗[/red] Token limit: {token_limit_kb:.0f} KB (must be >= 10 KB)")
+        compression_checks_passed = False
+
+    # Check diff_smart_priority_enabled
+    smart_status = "[green]✓[/green]" if config.diff_smart_priority_enabled else "[dim]○[/dim]"
+    smart_str = "enabled" if config.diff_smart_priority_enabled else "disabled"
+    console.print(f"  {smart_status} Smart prioritization: {smart_str}")
+
+    record_check("compression_config", compression_checks_passed, f"Strategy: {config.diff_compression_strategy}")
+
+    if not compression_checks_passed:
+        all_passed = False
+
+    # Prompt Delivery Configuration section
+    console.print("\n[bold]Prompt Delivery Configuration:[/bold]")
+    prompt_config_passed = True
+
+    # Check prompt_file_enabled
+    prompt_status = "[green]✓[/green]" if config.prompt_file_enabled else "[dim]○[/dim]"
+    prompt_enabled_str = "enabled" if config.prompt_file_enabled else "disabled"
+    console.print(f"  {prompt_status} File-based delivery: {prompt_enabled_str}")
+
+    # Check prompt_file_threshold_bytes
+    prompt_threshold_kb = config.prompt_file_threshold_bytes / 1024
+    if config.prompt_file_threshold_bytes >= 10_000:
+        console.print(f"  [green]✓[/green] Threshold: {prompt_threshold_kb:.0f} KB")
+    else:
+        console.print(f"  [red]✗[/red] Threshold: {prompt_threshold_kb:.0f} KB (must be >= 10 KB)")
+        prompt_config_passed = False
+
+    # Check temp directory
+    import tempfile as tempfile_module
+
+    temp_dir = tempfile_module.gettempdir()
+    console.print(f"  [green]✓[/green] Temp directory: {temp_dir}")
+
+    # Test temp directory write permissions
+    try:
+        # We need delete=False to test cleanup manually, so we can't use context manager
+        test_file = tempfile_module.NamedTemporaryFile(  # noqa: SIM115
+            mode="w", prefix="aca_test_", suffix=".txt", delete=False, dir=temp_dir
+        )
+        test_file.write("ACA temp file test")
+        test_file.close()
+        os.unlink(test_file.name)
+        console.print("  [green]✓[/green] Temp directory writable")
+    except Exception as e:
+        console.print(f"  [red]✗[/red] Temp directory not writable: {e}")
+        prompt_config_passed = False
+
+    # Check temp directory space (warn if less than 100MB)
+    try:
+        import shutil as shutil_module
+
+        total, used, free = shutil_module.disk_usage(temp_dir)
+        free_mb = free / (1024 * 1024)
+        if free_mb < 100:
+            console.print(f"  [yellow]⚠[/yellow] Temp directory low on space: {free_mb:.0f} MB free")
+        else:
+            console.print(f"  [green]✓[/green] Temp directory space: {free_mb:.0f} MB free")
+    except Exception:
+        console.print("  [dim]○[/dim] Could not check temp directory space")
+
+    record_check("prompt_delivery_config", prompt_config_passed, f"Threshold: {prompt_threshold_kb:.0f} KB")
+
+    if not prompt_config_passed:
+        all_passed = False
+
+    # Prompt Delivery Test section
+    console.print("\n[bold]Prompt Delivery Test:[/bold]")
+    prompt_test_passed = True
+
+    try:
+        # Create a mock large prompt (150KB) to test file-based delivery
+        mock_diff = "+" * 150_000  # 150KB of content
+        mock_prompt = f"""# Test Prompt
+
+## Staged Changes Diff
+{mock_diff}
+"""
+        mock_prompt_size_kb = len(mock_prompt.encode("utf-8")) / 1024
+        console.print(f"  Mock prompt size: {mock_prompt_size_kb:.1f} KB")
+
+        # Check if file-based delivery would trigger
+        from common_utils import should_use_file_based_prompt
+
+        would_trigger = should_use_file_based_prompt(mock_prompt, config)
+        if config.prompt_file_enabled:
+            if would_trigger:
+                console.print("  [green]✓[/green] File-based delivery would trigger")
+            else:
+                console.print("  [yellow]⚠[/yellow] File-based delivery would NOT trigger (threshold too high?)")
+        else:
+            console.print("  [dim]○[/dim] File-based delivery disabled, skipping trigger test")
+
+        # Test actual file creation and cleanup
+        if config.prompt_file_enabled:
+            from common_utils import cleanup_temp_prompt_file, create_file_based_prompt
+
+            result = create_file_based_prompt(mock_prompt)
+            if result is not None:
+                modified_prompt, temp_file_path = result
+                modified_size_kb = len(modified_prompt.encode("utf-8")) / 1024
+                console.print(f"  [green]✓[/green] File creation successful: {temp_file_path}")
+                console.print(f"  [green]✓[/green] Modified prompt size: {modified_size_kb:.1f} KB")
+
+                # Check temp file exists and has content
+                if os.path.exists(temp_file_path):
+                    file_size = os.path.getsize(temp_file_path)
+                    console.print(f"  [green]✓[/green] Temp file size: {file_size / 1024:.1f} KB")
+                else:
+                    console.print("  [red]✗[/red] Temp file was not created")
+                    prompt_test_passed = False
+
+                # Clean up
+                cleanup_temp_prompt_file(temp_file_path)
+                if not os.path.exists(temp_file_path):
+                    console.print("  [green]✓[/green] Cleanup successful")
+                else:
+                    console.print("  [yellow]⚠[/yellow] Cleanup may have failed (file still exists)")
+            else:
+                console.print("  [red]✗[/red] File-based prompt creation failed")
+                prompt_test_passed = False
+
+        if prompt_test_passed:
+            console.print("  [green]✓[/green] Prompt delivery test passed")
+            record_check("prompt_delivery_test", True, "Test passed")
+        else:
+            console.print("  [red]✗[/red] Prompt delivery test failed")
+            record_check("prompt_delivery_test", False, "Test failed")
+            all_passed = False
+
+    except Exception as e:
+        console.print(f"  [red]✗[/red] Prompt delivery test failed: {e}")
+        record_check("prompt_delivery_test", False, str(e))
+        all_passed = False
+
+    # Compression Simulation Test section
+    console.print("\n[bold]Compression Simulation Test:[/bold]")
+
+    # Generate synthetic files that guarantee exceeding the configured thresholds
+    # Use max(size_threshold + 1, files_threshold + 1) to ensure triggering
+    num_test_files = max(config.diff_files_threshold + 1, 8)
+    # Ensure size exceeds threshold: generate enough content per file
+    target_size_bytes = config.diff_size_threshold_bytes + 1024  # 1KB over threshold
+    bytes_per_file = (target_size_bytes // num_test_files) + 1
+
+    # Mix of file types to test filtering
+    test_files = [
+        ("src/main.py", "py"),
+        ("src/utils.py", "py"),
+        ("src/api/handler.ts", "ts"),
+        ("package-lock.json", "lock"),
+        ("dist/bundle.min.js", "min"),
+        ("src/components/App.tsx", "tsx"),
+        ("tests/test_main.py", "py"),
+        ("config.yaml", "yaml"),
+    ]
+    # Extend to ensure we have enough files
+    while len(test_files) < num_test_files:
+        idx = len(test_files)
+        test_files.append((f"src/module{idx}.py", "py"))
+
+    compression_test_passed = True
+    import tempfile
+
+    try:
+        # Create a temporary git repo with synthetic files
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+
+            # Initialize a git repo
+            subprocess.run(["git", "init", "-q"], cwd=tmpdir, check=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmpdir, check=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=tmpdir, check=True)
+
+            # Create directories and initial files
+            for filename, _ in test_files:
+                file_path = tmp_path / filename
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                # Write initial content
+                file_path.write_text(f"# Initial content for {filename}\n")
+
+            # Initial commit
+            subprocess.run(["git", "add", "."], cwd=tmpdir, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "Initial"], cwd=tmpdir, check=True)
+
+            # Modify files to create a diff that exceeds thresholds
+            lines_per_file = bytes_per_file // 50  # ~50 bytes per line
+            for filename, _ in test_files:
+                file_path = tmp_path / filename
+                content_lines = [f"# Modified content for {filename}"]
+                for i in range(lines_per_file):
+                    content_lines.append(f"line_{i} = 'modified content line {i} for file {filename}'")
+                file_path.write_text("\n".join(content_lines))
+
+            # Stage all changes
+            subprocess.run(["git", "add", "."], cwd=tmpdir, check=True)
+
+            # Open the repo and get the diff
+            import git
+
+            test_repo = git.Repo(tmpdir)
+            original_diff = test_repo.git.diff("--staged")
+
+            # Calculate diff size
+            diff_size = {
+                "bytes": len(original_diff.encode("utf-8")),
+                "chars": len(original_diff),
+                "lines": original_diff.count("\n"),
+                "files": len(test_files),
+            }
+
+            diff_size_kb = diff_size["bytes"] / 1024
+            console.print(f"  Synthetic diff: {diff_size_kb:.1f} KB, {diff_size['files']} files")
+
+            # Verify compression would trigger
+            would_compress = should_compress_diff(diff_size, config)
+            if would_compress:
+                console.print("  [green]✓[/green] Compression triggers (exceeds thresholds)")
+            else:
+                console.print("  [red]✗[/red] Compression should trigger but didn't")
+                console.print(
+                    f"    Size threshold: {config.diff_size_threshold_bytes} bytes, actual: {diff_size['bytes']} bytes"
+                )
+                console.print(f"    Files threshold: {config.diff_files_threshold}, actual: {diff_size['files']}")
+                compression_test_passed = False
+
+            # Actually run compression
+            console.print(f"  Testing compression strategy '{config.diff_compression_strategy}'...")
+
+            compressed_diff, compression_info = apply_compression_strategy(
+                test_repo, config.diff_compression_strategy, original_diff, config
+            )
+
+            # Verify compressed output is not empty
+            if not compressed_diff or len(compressed_diff.strip()) == 0:
+                console.print("  [red]✗[/red] Compression returned empty output")
+                compression_test_passed = False
+            else:
+                compressed_size_kb = len(compressed_diff.encode("utf-8")) / 1024
+                console.print(f"  [green]✓[/green] Compressed output: {compressed_size_kb:.1f} KB")
+
+            # Verify required metadata is present
+            required_metadata = ["strategy", "original_size", "compressed_size"]
+            missing_metadata = [key for key in required_metadata if key not in compression_info]
+
+            if missing_metadata:
+                console.print(f"  [red]✗[/red] Missing metadata: {', '.join(missing_metadata)}")
+                compression_test_passed = False
+            else:
+                console.print("  [green]✓[/green] Compression metadata complete")
+
+            # Show compression ratio
+            if compression_info.get("original_size") and compression_info.get("compressed_size"):
+                original_size = compression_info["original_size"]
+                compressed_size = compression_info["compressed_size"]
+                if original_size > 0:
+                    ratio = (1 - compressed_size / original_size) * 100
+                    console.print(f"  [green]✓[/green] Compression ratio: {ratio:.1f}%")
+
+            # Verify strategy reported matches configured
+            if compression_info.get("strategy") != config.diff_compression_strategy:
+                # Allow fallback to compact for unknown strategies
+                if compression_info.get("strategy") != "compact":
+                    console.print(
+                        f"  [yellow]⚠[/yellow] Strategy mismatch: expected "
+                        f"'{config.diff_compression_strategy}', got '{compression_info.get('strategy')}'"
+                    )
+
+        if compression_test_passed:
+            console.print("  [green]✓[/green] Compression simulation passed")
+            record_check("compression_simulation", True, f"Strategy: {config.diff_compression_strategy}")
+        else:
+            console.print("  [red]✗[/red] Compression simulation failed")
+            record_check("compression_simulation", False, "Compression test failed")
+            all_passed = False
+
+    except Exception as e:
+        console.print(f"  [red]✗[/red] Simulation failed: {e}")
+        record_check("compression_simulation", False, str(e))
+        all_passed = False
+
     # Check environment variables
     console.print("\n[bold]Environment Variables:[/bold]")
     env_vars = [
@@ -2824,6 +3341,55 @@ def doctor(ctx: click.Context, full: bool, export: bool) -> None:
         ),
         ("EDITOR", bool(os.environ.get("EDITOR")), os.environ.get("EDITOR", "Not set")),
         ("VISUAL", bool(os.environ.get("VISUAL")), os.environ.get("VISUAL", "Not set")),
+        # Compression-related environment variables
+        # ACA_DIFF_COMPRESSION is a short alias for ACA_DIFF_COMPRESSION_ENABLED
+        # Precedence: ACA_DIFF_COMPRESSION_ENABLED takes priority if both are set
+        (
+            "ACA_DIFF_COMPRESSION",
+            bool(os.environ.get("ACA_DIFF_COMPRESSION")),
+            os.environ.get("ACA_DIFF_COMPRESSION", "Not set"),
+        ),
+        (
+            "ACA_DIFF_COMPRESSION_ENABLED",
+            bool(os.environ.get("ACA_DIFF_COMPRESSION_ENABLED")),
+            os.environ.get("ACA_DIFF_COMPRESSION_ENABLED", "Not set"),
+        ),
+        (
+            "ACA_DIFF_COMPRESSION_STRATEGY",
+            bool(os.environ.get("ACA_DIFF_COMPRESSION_STRATEGY")),
+            os.environ.get("ACA_DIFF_COMPRESSION_STRATEGY", "Not set"),
+        ),
+        (
+            "ACA_DIFF_SIZE_THRESHOLD",
+            bool(os.environ.get("ACA_DIFF_SIZE_THRESHOLD")),
+            os.environ.get("ACA_DIFF_SIZE_THRESHOLD", "Not set"),
+        ),
+        (
+            "ACA_DIFF_FILES_THRESHOLD",
+            bool(os.environ.get("ACA_DIFF_FILES_THRESHOLD")),
+            os.environ.get("ACA_DIFF_FILES_THRESHOLD", "Not set"),
+        ),
+        (
+            "ACA_DIFF_MAX_PRIORITY_FILES",
+            bool(os.environ.get("ACA_DIFF_MAX_PRIORITY_FILES")),
+            os.environ.get("ACA_DIFF_MAX_PRIORITY_FILES", "Not set"),
+        ),
+        (
+            "ACA_DIFF_TOKEN_LIMIT",
+            bool(os.environ.get("ACA_DIFF_TOKEN_LIMIT")),
+            os.environ.get("ACA_DIFF_TOKEN_LIMIT", "Not set"),
+        ),
+        # Prompt delivery environment variables
+        (
+            "ACA_PROMPT_FILE_ENABLED",
+            bool(os.environ.get("ACA_PROMPT_FILE_ENABLED")),
+            os.environ.get("ACA_PROMPT_FILE_ENABLED", "Not set"),
+        ),
+        (
+            "ACA_PROMPT_FILE_THRESHOLD",
+            bool(os.environ.get("ACA_PROMPT_FILE_THRESHOLD")),
+            os.environ.get("ACA_PROMPT_FILE_THRESHOLD", "Not set"),
+        ),
     ]
 
     for var_name, is_set, display_value in env_vars:
@@ -2849,6 +3415,24 @@ def doctor(ctx: click.Context, full: bool, export: bool) -> None:
             "python": sys.version.split()[0],
             "platform": sys.platform,
         }
+
+    # Add compression configuration to diagnostic info for export
+    diagnostic_info["compression"] = {
+        "enabled": config.diff_compression_enabled,
+        "strategy": config.diff_compression_strategy,
+        "size_threshold_kb": config.diff_size_threshold_bytes / 1024,
+        "files_threshold": config.diff_files_threshold,
+        "max_priority_files": config.diff_max_priority_files,
+        "token_limit": config.diff_token_limit,
+        "smart_priority_enabled": config.diff_smart_priority_enabled,
+    }
+
+    # Add prompt delivery configuration to diagnostic info for export
+    diagnostic_info["prompt_delivery"] = {
+        "enabled": config.prompt_file_enabled,
+        "threshold_kb": config.prompt_file_threshold_bytes / 1024,
+        "temp_directory": tempfile_module.gettempdir(),
+    }
 
     # Full test with actual API call
     if full and all_passed:

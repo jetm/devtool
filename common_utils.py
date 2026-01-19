@@ -62,6 +62,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -115,6 +116,9 @@ class ACAConfig:
     diff_max_priority_files: int = 15  # Maximum files with full diff in smart compression
     diff_token_limit: int = 100_000  # Maximum character count for compressed diff output
     diff_smart_priority_enabled: bool = True  # Enable smart file prioritization
+    # Prompt file-based delivery settings (to bypass ARG_MAX limits)
+    prompt_file_threshold_bytes: int = 50_000  # 50KB - threshold for file-based delivery
+    prompt_file_enabled: bool = True  # Enable automatic file-based prompt delivery
 
     @classmethod
     def load(cls) -> ACAConfig:
@@ -158,6 +162,11 @@ class ACAConfig:
                 config.diff_smart_priority_enabled = data.get(
                     "diff_smart_priority_enabled", config.diff_smart_priority_enabled
                 )
+                # Prompt file-based delivery settings
+                config.prompt_file_threshold_bytes = data.get(
+                    "prompt_file_threshold_bytes", config.prompt_file_threshold_bytes
+                )
+                config.prompt_file_enabled = data.get("prompt_file_enabled", config.prompt_file_enabled)
             except Exception as e:
                 logger.warning(f"Failed to load config file {config_path}: {e}")
 
@@ -193,8 +202,23 @@ class ACAConfig:
             except ValueError:
                 logger.warning(f"Invalid ACA_DIFF_FILES_THRESHOLD value: {env_files_threshold}")
 
-        if env_compression := os.environ.get("ACA_DIFF_COMPRESSION_ENABLED"):
-            config.diff_compression_enabled = env_compression.lower() in (
+        # Diff compression enabled/disabled environment variable overrides
+        # ACA_DIFF_COMPRESSION is a short alias for ACA_DIFF_COMPRESSION_ENABLED
+        # Precedence: ACA_DIFF_COMPRESSION_ENABLED takes priority if both are set
+        env_compression_short = os.environ.get("ACA_DIFF_COMPRESSION")
+        env_compression_long = os.environ.get("ACA_DIFF_COMPRESSION_ENABLED")
+
+        if env_compression_long is not None:
+            # Explicit long form takes precedence
+            config.diff_compression_enabled = env_compression_long.lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+        elif env_compression_short is not None:
+            # Short alias used if long form not set
+            config.diff_compression_enabled = env_compression_short.lower() in (
                 "1",
                 "true",
                 "yes",
@@ -232,6 +256,21 @@ class ACAConfig:
                 "on",
             )
 
+        # Prompt file-based delivery environment variable overrides
+        if env_prompt_threshold := os.environ.get("ACA_PROMPT_FILE_THRESHOLD"):
+            try:
+                config.prompt_file_threshold_bytes = int(env_prompt_threshold)
+            except ValueError:
+                logger.warning(f"Invalid ACA_PROMPT_FILE_THRESHOLD value: {env_prompt_threshold}")
+
+        if env_prompt_file := os.environ.get("ACA_PROMPT_FILE_ENABLED"):
+            config.prompt_file_enabled = env_prompt_file.lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+
         # Validate smart compression settings
         if config.diff_max_priority_files < 1 or config.diff_max_priority_files > 50:
             logger.warning(
@@ -245,6 +284,14 @@ class ACAConfig:
                 f"diff_token_limit={config.diff_token_limit} too small (minimum 10000), using default 100000"
             )
             config.diff_token_limit = 100_000
+
+        # Validate prompt file settings
+        if config.prompt_file_threshold_bytes < 10_000:
+            logger.warning(
+                f"prompt_file_threshold_bytes={config.prompt_file_threshold_bytes} too small (minimum 10000), "
+                f"using default 50000"
+            )
+            config.prompt_file_threshold_bytes = 50_000
 
         return config
 
@@ -1013,7 +1060,12 @@ def print_error(console: Console, message: str) -> None:
 
 
 async def _generate_with_claude_impl(
-    prompt: str, cwd: str, timeout: int | None = None, model: str | None = None
+    prompt: str,
+    cwd: str,
+    timeout: int | None = None,
+    model: str | None = None,
+    skip_file_based_delivery: bool = False,
+    section_marker: str | None = None,
 ) -> str:
     """Internal implementation of generate_with_claude without retry.
 
@@ -1022,6 +1074,10 @@ async def _generate_with_claude_impl(
         cwd: The current working directory for the agent.
         timeout: Timeout in seconds for the operation.
         model: Model alias to use ("sonnet", "opus", "haiku"). If None, uses config default.
+        skip_file_based_delivery: If True, skip automatic file-based prompt delivery.
+                                  Use when the caller has already prepared the prompt.
+        section_marker: The section marker to use when extracting content for file-based
+                       delivery (e.g., "## Commits"). If None, uses the default marker.
 
     Returns:
         The accumulated text content from the response.
@@ -1033,6 +1089,24 @@ async def _generate_with_claude_impl(
     _timeout = timeout if timeout is not None else config.timeout
     _model = model if model is not None else config.default_model
 
+    # Check if file-based prompt delivery is needed for large prompts
+    temp_file_path: str | None = None
+    actual_prompt = prompt
+
+    if not skip_file_based_delivery and should_use_file_based_prompt(prompt, config):
+        prompt_size_kb = len(prompt.encode("utf-8")) / 1024
+        logger.info(f"Prompt size ({prompt_size_kb:.1f} KB) exceeds threshold, attempting file-based delivery")
+        file_result = create_file_based_prompt(prompt, section_marker=section_marker, target_dir=cwd)
+        if file_result is not None:
+            actual_prompt, temp_file_path = file_result
+            modified_size_kb = len(actual_prompt.encode("utf-8")) / 1024
+            logger.info(
+                f"Using file-based prompt delivery: {prompt_size_kb:.1f} KB -> {modified_size_kb:.1f} KB "
+                f"(content written to {temp_file_path})"
+            )
+        else:
+            logger.warning("File-based prompt creation failed, using original prompt")
+
     options = ClaudeAgentOptions(permission_mode="acceptEdits", cwd=cwd, model=_model)
     accumulated_text = ""
     result_message: ResultMessage | None = None
@@ -1041,7 +1115,7 @@ async def _generate_with_claude_impl(
 
     async def collect_response() -> None:
         nonlocal accumulated_text, result_message
-        async for message in query(prompt=prompt, options=options):
+        async for message in query(prompt=actual_prompt, options=options):
             if isinstance(message, SystemMessage):
                 # Initialization message, no text content to extract
                 continue
@@ -1067,6 +1141,10 @@ async def _generate_with_claude_impl(
     except Exception as e:
         logger.error(f"Claude query failed: {e}")
         raise _classify_error(e) from e
+    finally:
+        # Clean up temporary file if one was created
+        if temp_file_path is not None:
+            cleanup_temp_prompt_file(temp_file_path)
 
     # Use ResultMessage.result if available and accumulated text is empty
     if result_message is not None:
@@ -1086,7 +1164,14 @@ async def _generate_with_claude_impl(
 
 
 @retry_with_backoff()
-async def generate_with_claude(prompt: str, cwd: str, timeout: int | None = None, model: str | None = None) -> str:
+async def generate_with_claude(
+    prompt: str,
+    cwd: str,
+    timeout: int | None = None,
+    model: str | None = None,
+    skip_file_based_delivery: bool = False,
+    section_marker: str | None = None,
+) -> str:
     """Call Claude Agent SDK to generate content.
 
     Parses the streaming response from Claude Agent SDK, extracting text content
@@ -1105,6 +1190,10 @@ async def generate_with_claude(prompt: str, cwd: str, timeout: int | None = None
         timeout: Timeout in seconds (default from config/ACA_TIMEOUT env var).
         model: Model alias to use ("sonnet", "opus", "haiku"). If None, uses
                config default (from ~/.config/aca/config.toml or ACA_DEFAULT_MODEL).
+        skip_file_based_delivery: If True, skip automatic file-based prompt delivery.
+                                  Use when the caller has already prepared the prompt.
+        section_marker: The section marker to use when extracting content for file-based
+                       delivery (e.g., "## Commits"). If None, uses the default marker.
 
     Returns:
         The accumulated text content from the response.
@@ -1117,7 +1206,7 @@ async def generate_with_claude(prompt: str, cwd: str, timeout: int | None = None
         ClaudeRateLimitError: If rate limited (after retries).
         ClaudeContentError: If response is empty or invalid.
     """
-    return await _generate_with_claude_impl(prompt, cwd, timeout, model)
+    return await _generate_with_claude_impl(prompt, cwd, timeout, model, skip_file_based_delivery, section_marker)
 
 
 def generate_with_progress(
@@ -1126,6 +1215,8 @@ def generate_with_progress(
     cwd: str,
     message: str = "Generating...",
     model: str | None = None,
+    skip_file_based_delivery: bool = False,
+    section_marker: str | None = None,
 ) -> str:
     """Generate content with Claude showing a progress spinner.
 
@@ -1136,6 +1227,10 @@ def generate_with_progress(
         message: Message to display during generation
         model: Model alias to use ("sonnet", "opus", "haiku"). If None, uses
                config default (from ~/.config/aca/config.toml or ACA_DEFAULT_MODEL).
+        skip_file_based_delivery: If True, skip automatic file-based prompt delivery.
+                                  Use when the caller has already prepared the prompt.
+        section_marker: The section marker to use when extracting content for file-based
+                       delivery (e.g., "## Commits"). If None, uses the default marker.
 
     Returns:
         Generated content from Claude
@@ -1146,7 +1241,15 @@ def generate_with_progress(
     # Don't show spinner if plain text mode
     if console.no_color:
         console.print(message)
-        return asyncio.run(generate_with_claude(prompt, cwd, model=model))
+        return asyncio.run(
+            generate_with_claude(
+                prompt,
+                cwd,
+                model=model,
+                skip_file_based_delivery=skip_file_based_delivery,
+                section_marker=section_marker,
+            )
+        )
 
     with Progress(
         SpinnerColumn(),
@@ -1155,4 +1258,209 @@ def generate_with_progress(
         transient=True,
     ) as progress:
         progress.add_task(description=message, total=None)
-        return asyncio.run(generate_with_claude(prompt, cwd, model=model))
+        return asyncio.run(
+            generate_with_claude(
+                prompt,
+                cwd,
+                model=model,
+                skip_file_based_delivery=skip_file_based_delivery,
+                section_marker=section_marker,
+            )
+        )
+
+
+# =============================================================================
+# File-Based Prompt Delivery
+# Handles large prompts by writing to temporary files to bypass ARG_MAX limits
+# =============================================================================
+
+# Threshold for switching to file-based delivery (50KB default)
+# This is conservative to avoid ARG_MAX issues with environment variables
+PROMPT_SIZE_THRESHOLD_FOR_FILE = 50 * 1024
+
+
+def write_prompt_to_tempfile(content: str, prefix: str = "aca_prompt_", target_dir: str | None = None) -> str:
+    """Write prompt content to a temporary file.
+
+    Args:
+        content: The content to write to the file
+        prefix: Prefix for the temporary file name
+        target_dir: Directory where the temp file should be created. If provided,
+                    ensures the file is in a location accessible to the Claude CLI.
+                    Falls back to system temp directory if None.
+
+    Returns:
+        The path to the created temporary file
+
+    Raises:
+        OSError: If the file cannot be created or written
+    """
+    try:
+        # Determine the directory for the temp file
+        temp_dir = None
+        if target_dir:
+            # Create .aca/tmp subdirectory under the target directory
+            aca_tmp_dir = Path(target_dir) / ".aca" / "tmp"
+            try:
+                aca_tmp_dir.mkdir(parents=True, exist_ok=True)
+                temp_dir = str(aca_tmp_dir)
+                logger.debug(f"Using repo-local temp directory: {temp_dir}")
+            except OSError as e:
+                logger.warning(f"Failed to create repo temp directory {aca_tmp_dir}: {e}, using system temp")
+                temp_dir = None
+
+        # We need delete=False to keep the file after closing, so we can't use context manager
+        fd = tempfile.NamedTemporaryFile(  # noqa: SIM115
+            mode="w",
+            suffix=".md",
+            prefix=prefix,
+            dir=temp_dir,
+            delete=False,
+            encoding="utf-8",
+        )
+        fd.write(content)
+        fd.close()
+        logger.debug(f"Wrote prompt content to temp file: {fd.name} ({len(content)} bytes)")
+        return fd.name
+    except OSError as e:
+        logger.error(f"Failed to write prompt to temp file: {e}")
+        raise
+
+
+def cleanup_temp_prompt_file(file_path: str | None) -> None:
+    """Safely delete a temporary prompt file.
+
+    Args:
+        file_path: Path to the temporary file, or None (no-op)
+    """
+    if file_path is None:
+        return
+
+    try:
+        os.unlink(file_path)
+        logger.debug(f"Cleaned up temp prompt file: {file_path}")
+    except OSError as e:
+        # Log but don't raise - cleanup failures shouldn't break the flow
+        logger.warning(f"Failed to clean up temp prompt file {file_path}: {e}")
+
+
+def create_file_based_prompt(
+    original_prompt: str,
+    section_marker: str | None = None,
+    target_dir: str | None = None,
+) -> tuple[str, str] | None:
+    """Create a file-based prompt by extracting content and writing to a temp file.
+
+    Extracts the content section from the original prompt (based on section_marker),
+    writes it to a temporary file, and returns a modified prompt that references the file.
+    If no marker is provided or found, falls back to writing the entire prompt to a temp
+    file with a minimal wrapper.
+
+    Args:
+        original_prompt: The full prompt including the content to extract
+        section_marker: The markdown header marking the start of the section to extract
+                       (e.g., "## Staged Changes Diff", "## Commits"). If None, the entire
+                       prompt is written to the file.
+        target_dir: Directory where the temp file should be created (typically repo cwd).
+                   Ensures the file is in a location accessible to the Claude CLI.
+
+    Returns:
+        Tuple of (modified_prompt, temp_file_path), or None if the operation fails
+
+    Raises:
+        OSError: If the temp file cannot be created
+    """
+    # Default marker for backwards compatibility (commit diff)
+    default_marker = "## Staged Changes Diff"
+    marker = section_marker if section_marker is not None else default_marker
+
+    # Try to find the marker in the prompt
+    if marker in original_prompt:
+        # Split at the marker
+        parts = original_prompt.split(marker, 1)
+        header = parts[0]
+
+        # Extract the format note and content after the marker
+        if len(parts) > 1:
+            rest = parts[1]
+            newline_idx = rest.find("\n")
+            if newline_idx != -1:
+                format_note = rest[:newline_idx]
+                section_content = rest[newline_idx + 1 :]
+            else:
+                format_note = ""
+                section_content = ""
+        else:
+            format_note = ""
+            section_content = ""
+
+        if not section_content.strip():
+            logger.warning("Section content is empty, skipping file-based delivery")
+            return None
+
+        # Write section content to temp file
+        temp_file_path = write_prompt_to_tempfile(section_content.strip(), prefix="aca_content_", target_dir=target_dir)
+
+        # Construct the modified prompt with file reference
+        modified_prompt = f"""{header}{marker}{format_note}
+
+**NOTE**: The content is too large to include directly in this prompt.
+Please read the content from the following file:
+
+**File path**: `{temp_file_path}`
+
+After reading the file, analyze the content and follow the instructions above.
+"""
+
+        logger.debug(
+            f"Created file-based prompt with marker '{marker}': original={len(original_prompt)} bytes, "
+            f"modified={len(modified_prompt)} bytes, content_file={temp_file_path}"
+        )
+
+        return modified_prompt, temp_file_path
+
+    # Fallback: no marker found or marker is None - write entire prompt to file
+    logger.info(f"Marker '{marker}' not found in prompt, falling back to full prompt file-based delivery")
+
+    # Write the entire prompt to a temp file
+    temp_file_path = write_prompt_to_tempfile(original_prompt, prefix="aca_full_prompt_", target_dir=target_dir)
+
+    # Construct a minimal wrapper prompt
+    modified_prompt = f"""Please read and follow the instructions in the file below.
+
+**File path**: `{temp_file_path}`
+
+Read the file contents carefully and execute the task described within.
+"""
+
+    logger.debug(
+        f"Created file-based prompt (full fallback): original={len(original_prompt)} bytes, "
+        f"modified={len(modified_prompt)} bytes, prompt_file={temp_file_path}"
+    )
+
+    return modified_prompt, temp_file_path
+
+
+def should_use_file_based_prompt(prompt: str, config: ACAConfig) -> bool:
+    """Determine if file-based prompt delivery should be used.
+
+    Args:
+        prompt: The prompt to check
+        config: The ACA configuration
+
+    Returns:
+        True if file-based delivery should be used, False otherwise
+    """
+    if not config.prompt_file_enabled:
+        return False
+
+    prompt_size = len(prompt.encode("utf-8"))
+    threshold = config.prompt_file_threshold_bytes
+
+    if prompt_size > threshold:
+        logger.debug(
+            f"Prompt size ({prompt_size} bytes) exceeds threshold ({threshold} bytes), will use file-based delivery"
+        )
+        return True
+
+    return False
