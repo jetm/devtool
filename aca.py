@@ -1612,6 +1612,7 @@ what changed - the commit message explains *why*.
 
 ### Optional Related Line
 - If branch name contains a ticket ID (e.g., `IOTIL-1639-...`), add `Related: IOTIL-1639` as the last line before Signed-off-by
+- DON'T add "Related:" if a ticket has not been found.
 
 ### Output
 - Return *only* the commit message (Subject + Body + optional Related line)
@@ -1631,8 +1632,6 @@ Expose a dedicated endpoint on TestRunViewSet that returns parsed OEQA
 JSON results. This enables CI systems and dashboards to consume test
 data programmatically without requiring direct database access or
 custom parsing logic.
-
-Related: IOTIL-1639
 ```"""
 
 MR_PROMPT_TEMPLATE = """Create a GitLab merge request for the following commits.
