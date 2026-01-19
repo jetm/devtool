@@ -369,13 +369,41 @@ def strip_markdown_code_blocks(text: str) -> str:
     content
     ```
     or
-    ```commit
+    ```markdown
     content
     ```
+    or with ellipsis patterns:
+    ```
+    ...
+    content
+    ...
+    ```
     """
+    # Known language identifiers that can appear as the first content line
+    # when the opening fence is exactly ``` (no language on the same line)
+    KNOWN_LANG_IDENTIFIERS = {"markdown", "commit", "text", "txt"}
+
     lines = text.strip().split("\n")
     if len(lines) >= 2 and lines[0].startswith("```") and lines[-1] == "```":
-        return "\n".join(lines[1:-1]).strip()
+        opening_fence = lines[0].strip()
+        # Extract content between ``` markers
+        content_lines = lines[1:-1]
+
+        # Only skip the first content line as a language identifier when:
+        # 1. The opening fence is exactly ``` (no language attached), AND
+        # 2. The first content line is a known language identifier
+        if opening_fence == "```" and content_lines and content_lines[0].strip().lower() in KNOWN_LANG_IDENTIFIERS:
+            content_lines = content_lines[1:]
+
+        # Strip leading ... patterns
+        while content_lines and content_lines[0].strip() in ("...", ""):
+            content_lines = content_lines[1:]
+
+        # Strip trailing ... patterns
+        while content_lines and content_lines[-1].strip() in ("...", ""):
+            content_lines = content_lines[:-1]
+
+        return "\n".join(content_lines).strip()
     return text
 
 
@@ -384,14 +412,27 @@ def clean_mr_description(description: str) -> str:
 
     Handles:
     - Markdown code block wrappers (```markdown ... ```)
+    - Standalone wrapper artifact lines (markdown, ...) outside code fences
     - Leading "# Description" or "## Description" headers (case-insensitive)
     - Leading empty lines
     """
+    # Wrapper artifact patterns that should be trimmed from leading/trailing lines
+    WRAPPER_ARTIFACTS = {"markdown", "...", ""}
+
     # First strip markdown code blocks
     cleaned = strip_markdown_code_blocks(description)
 
     # Split into lines and process
     lines = cleaned.split("\n")
+
+    # Trim leading wrapper artifacts (markdown, ..., empty lines)
+    while lines and lines[0].strip().lower() in WRAPPER_ARTIFACTS:
+        lines = lines[1:]
+
+    # Trim trailing wrapper artifacts (markdown, ..., empty lines)
+    while lines and lines[-1].strip().lower() in WRAPPER_ARTIFACTS:
+        lines = lines[:-1]
+
     result_lines = []
     skip_header = True  # Skip headers only at the beginning
 
@@ -409,6 +450,42 @@ def clean_mr_description(description: str) -> str:
         result_lines.append(line)
 
     return "\n".join(result_lines).strip()
+
+
+def clean_mr_output(content: str) -> str:
+    """Clean full MR output by removing code block wrappers around sections.
+
+    Handles LLM output like:
+    **Title:**
+    ```
+    [IOTIL-123] Title content
+    ```
+
+    **Description:**
+    ```markdown
+    ## Problem
+    Description content
+    ```
+
+    Returns the content with code blocks removed, keeping section structure.
+    """
+    # Pattern to match section headers followed by code blocks
+    # Matches: **Label:**\n```[lang]\ncontent\n```
+    # Or: Label:\n```[lang]\ncontent\n```
+    pattern = re.compile(
+        r"(\*{0,2}(?:Title|Description):\*{0,2})\s*\n"  # Section header
+        r"```[a-zA-Z]*\n"  # Opening fence with optional language
+        r"(.*?)"  # Content (non-greedy)
+        r"\n```",  # Closing fence
+        re.DOTALL | re.IGNORECASE,
+    )
+
+    def replace_section(match: re.Match[str]) -> str:
+        header = match.group(1)
+        content = match.group(2).strip()
+        return f"{header}\n{content}"
+
+    return pattern.sub(replace_section, content)
 
 
 # =============================================================================
@@ -2225,6 +2302,16 @@ def mr_desc(ctx: click.Context, base: str | None) -> None:
         )
         sys.exit(1)
 
+    # Display commits to be included in MR
+    commit_count = len(commits.strip().split("\n"))
+    console.print(
+        f"\n[bold]Commits to be included in MR[/bold] ({commit_count} commit{'s' if commit_count != 1 else ''}):"
+    )
+    console.print(f"[dim]Base: {log_base}[/dim]")
+    for commit_line in commits.strip().split("\n"):
+        console.print(f"  • {commit_line}")
+    console.print()
+
     # Extract ticket number
     ticket_number = extract_ticket_number(current_branch)
     ticket_display = ticket_number if ticket_number else "<not detected, ask user>"
@@ -2315,6 +2402,9 @@ def mr_desc(ctx: click.Context, base: str | None) -> None:
     # Type narrowing for linters/type-checkers.
     assert mr_content is not None
 
+    # Clean markdown wrappers from the generated content
+    mr_content = clean_mr_output(mr_content)
+
     # Display the generated content and prompt for action
     while True:
         console.print("\n[bold]Generated Merge Request:[/bold]\n")
@@ -2352,12 +2442,12 @@ def mr_desc(ctx: click.Context, base: str | None) -> None:
         if not title:
             title_match = re.match(r"^(?:Title:|##?\s*Title:?)\s*(.+)$", line, re.I)
             if title_match:
-                title = title_match.group(1).strip()
+                title = strip_markdown_code_blocks(title_match.group(1).strip())
                 continue
             # Also check for [IOTIL-###] pattern at start
             iotil_match = re.match(r"^(\[IOTIL-\d+\].+)$", line.strip())
             if iotil_match:
-                title = iotil_match.group(1).strip()
+                title = strip_markdown_code_blocks(iotil_match.group(1).strip())
                 continue
 
         # Collect description
@@ -2374,10 +2464,10 @@ def mr_desc(ctx: click.Context, base: str | None) -> None:
             # Remove markdown heading prefixes (e.g., "# ", "## ", "### ")
             heading_match = re.match(r"^#+\s*(.+)$", stripped)
             if heading_match:
-                title = heading_match.group(1).strip()
+                title = strip_markdown_code_blocks(heading_match.group(1).strip())
                 break
             # Use the first non-empty line as-is
-            title = stripped
+            title = strip_markdown_code_blocks(stripped)
             break
 
     if not title:
@@ -2395,10 +2485,13 @@ def mr_desc(ctx: click.Context, base: str | None) -> None:
     # Clean the description to remove markdown wrappers and headers
     description = clean_mr_description(description)
 
+    # Clean title for branch naming (strip any remaining markdown wrappers)
+    cleaned_title = strip_markdown_code_blocks(title)
+
     # Handle branch renaming before creating MR
     # Construct new branch name from ticket number and slugified title
     if ticket_number:
-        slugified_title = slugify_branch_name(title)
+        slugified_title = slugify_branch_name(cleaned_title)
         if slugified_title:
             new_branch_name = f"IOTIL-{ticket_number}-{slugified_title}"
         else:
@@ -2418,7 +2511,7 @@ def mr_desc(ctx: click.Context, base: str | None) -> None:
                 print_error(console, "Ticket number must be numeric.")
                 sys.exit(1)
             ticket_number = ticket_input
-            slugified_title = slugify_branch_name(title)
+            slugified_title = slugify_branch_name(cleaned_title)
             if slugified_title:
                 new_branch_name = f"IOTIL-{ticket_number}-{slugified_title}"
             else:
