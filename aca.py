@@ -473,6 +473,12 @@ def clean_mr_output(content: str) -> str:
     [IOTIL-123] Title content
     ```
 
+    Or with markdown headers:
+    ## Title
+    ```
+    [IOTIL-123] Title content
+    ```
+
     **Description:**
     ```markdown
     ## Problem
@@ -482,14 +488,18 @@ def clean_mr_output(content: str) -> str:
     Returns the content with code blocks removed, keeping section structure.
     """
     # Pattern to match section headers followed by code blocks
-    # Matches: **Label:**\n```[lang]\ncontent\n```
-    # Or: Label:\n```[lang]\ncontent\n```
+    # Matches various header formats:
+    # - **Label:** or *Label:* or Label:
+    # - ## Label or # Label or ## Label: (markdown headers with optional colon)
+    # Anchored to start of line to avoid matching subheadings inside description body
     pattern = re.compile(
-        r"(\*{0,2}(?:Title|Description):\*{0,2})\s*\n"  # Section header
+        r"^\s*"  # Anchor to start of line with optional leading whitespace
+        r"((?:\*{0,2}(?:Title|Description):\*{0,2})|(?:#{1,2}\s*(?:Title|Description):?))"  # Section header
+        r"\s*\n"  # Newline after header
         r"```[a-zA-Z]*\n"  # Opening fence with optional language
         r"(.*?)"  # Content (non-greedy)
         r"\n```",  # Closing fence
-        re.DOTALL | re.IGNORECASE,
+        re.DOTALL | re.IGNORECASE | re.MULTILINE,
     )
 
     def replace_section(match: re.Match[str]) -> str:
@@ -2668,11 +2678,18 @@ def mr_desc(ctx: click.Context, base: str | None) -> None:
     # Handle branch renaming before creating MR
     # Construct new branch name from ticket number and slugified title
     if ticket_number:
-        slugified_title = slugify_branch_name(cleaned_title)
+        # Compute expected branch name from title before checking if rename is needed
+        title_without_ticket = re.sub(r"^\[IOTIL-\d+\]\s*", "", cleaned_title, flags=re.IGNORECASE)
+        slugified_title = slugify_branch_name(title_without_ticket)
         if slugified_title:
-            new_branch_name = f"IOTIL-{ticket_number}-{slugified_title}"
+            expected_branch_name = f"IOTIL-{ticket_number}-{slugified_title}"
         else:
-            new_branch_name = f"IOTIL-{ticket_number}"
+            expected_branch_name = f"IOTIL-{ticket_number}"
+        # Only skip rename if branch already matches the expected name (case-insensitive)
+        if current_branch.upper() == expected_branch_name.upper():
+            new_branch_name = None
+        else:
+            new_branch_name = expected_branch_name
     else:
         # Prompt user for ticket number if not detected
         console.print("[yellow]No IOTIL ticket number detected in branch name.[/yellow]")
@@ -2688,7 +2705,9 @@ def mr_desc(ctx: click.Context, base: str | None) -> None:
                 print_error(console, "Ticket number must be numeric.")
                 sys.exit(1)
             ticket_number = ticket_input
-            slugified_title = slugify_branch_name(cleaned_title)
+            # Strip [IOTIL-xxx] prefix from title before slugifying to avoid duplication
+            title_without_ticket = re.sub(r"^\[IOTIL-\d+\]\s*", "", cleaned_title, flags=re.IGNORECASE)
+            slugified_title = slugify_branch_name(title_without_ticket)
             if slugified_title:
                 new_branch_name = f"IOTIL-{ticket_number}-{slugified_title}"
             else:
