@@ -9,6 +9,8 @@ CLAUDE.md
 .pre-commit-config.yaml
 __pycache__
 *.log
+logs/
+specs/
 
 # Python scripts (these are the targets, not chezmoi sources)
 *.py
