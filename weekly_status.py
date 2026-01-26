@@ -74,7 +74,7 @@ Setting Up Environment Variables:
 Jira base URL: https://linaro.atlassian.net
 Confluence base URL: https://linaro.atlassian.net/wiki
 Projects: IOTIL, IS
-Done statuses: Closed, Resolved, Ready For Release
+Done statuses: Closed, Done, Fixed, Ready For Release, Resolved
 
 Requirements
 ------------
@@ -112,7 +112,7 @@ APPFOX_API_URL = "https://ac-cloud.com/compliance/api/v1"
 
 # Jira Query Configuration
 JIRA_PROJECTS = ["IOTIL", "IS"]
-JIRA_DONE_STATUSES = ["Closed", "Resolved", "Ready For Release"]
+JIRA_DONE_STATUSES = ["Closed", "Done", "Fixed", "Ready For Release", "Resolved"]
 
 
 # =============================================================================
@@ -943,15 +943,15 @@ def build_page_content(completed: list[dict], created: list[dict], open_items: l
             '<ac:parameter ac:name="borderColor">#FFAB00</ac:parameter>'
             '<ac:parameter ac:name="bgColor">#FFFFFF</ac:parameter>'
             '<ac:parameter ac:name="titleBGColor">#FFF7D6</ac:parameter>'
-            '<ac:parameter ac:name="title">Task Summary</ac:parameter>'
-            "<ac:rich-text-body><p>Summary these tasks here</p></ac:rich-text-body>"
+            '<ac:parameter ac:name="title">Tasks Summary</ac:parameter>'
+            "<ac:rich-text-body><p>Write a tasks summary here</p></ac:rich-text-body>"
             "</ac:structured-macro>"
         ),
-        "<h2>Completed this week</h2>",
+        "<h2>Tasks Completed this Week</h2>",
         build_table(completed, JIRA_BASE_URL),
-        "<h2>Added this week</h2>",
+        "<h2>Tasks Added this Week</h2>",
         build_table(created, JIRA_BASE_URL),
-        "<h2>Current open items</h2>",
+        "<h2>Tasks Currently Open</h2>",
         build_table(open_items, JIRA_BASE_URL),
     ]
 
