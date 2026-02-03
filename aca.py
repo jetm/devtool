@@ -49,6 +49,7 @@ Environment variable overrides:
 Debugging flags (for commit command):
     --no-compress     Disable compression for this commit (overrides config/env)
     --show-prompt     Display the full prompt before sending to Claude
+    --title-only, -t  Generate only a subject line (quick commit, implies --yes, uses haiku)
 
 Troubleshooting:
     - Use `aca commit --show-prompt` to inspect the exact prompt sent to Claude
@@ -1655,6 +1656,18 @@ def extract_commit_message(text: str) -> str | None:
     return result if result else None
 
 
+def truncate_title(title: str, max_length: int = 75) -> str:
+    """Truncate a commit title to max_length, cutting at word boundary."""
+    title = title.split("\n")[0].strip()
+    if len(title) <= max_length:
+        return title
+    truncated = title[:max_length]
+    last_space = truncated.rfind(" ")
+    if last_space > max_length // 2:
+        return truncated[:last_space]
+    return truncated
+
+
 COMMIT_PROMPT = """## Generate Commit Message
 
 Analyze the diff output and generate a commit message following these rules strictly:
@@ -1732,6 +1745,21 @@ JSON results. This enables CI systems and dashboards to consume test
 data programmatically without requiring direct database access or
 custom parsing logic.
 ```"""
+
+COMMIT_TITLE_ONLY_PROMPT = """## Generate Commit Subject Line Only
+
+Analyze the diff and generate ONLY a single-line commit subject. Rules:
+
+- Start with subsystem prefix based on file paths (e.g., `iotil/rest:`, `drivers/net:`)
+- Imperative mood (e.g., "Fix memory leak" not "Fixed memory leak")
+- Capitalize first letter after prefix
+- No trailing period
+- Maximum 70 characters
+- NO body, NO blank lines, NO Related line, NO Signed-off-by
+- Return ONLY the subject line, nothing else
+- NO markdown formatting, NO code blocks
+
+Example: iotil/rest: Add OEQA results retrieval endpoint"""
 
 MR_PROMPT_TEMPLATE = """Create a GitLab merge request for the following commits.
 
@@ -1833,9 +1861,18 @@ def cli(ctx: click.Context, plain_text: bool, verbose: bool) -> None:
     is_flag=True,
     help="Auto-confirm prompts (skips edit/commit/abort and show-prompt confirmations; error recovery remains interactive)",
 )
+@click.option(
+    "--title-only",
+    "-t",
+    is_flag=True,
+    help="Generate only a commit subject line (quick commit, implies --yes, uses haiku)",
+)
 @click.pass_context
-def commit(ctx: click.Context, no_compress: bool, show_prompt: bool, yes: bool) -> None:
+def commit(ctx: click.Context, no_compress: bool, show_prompt: bool, yes: bool, title_only: bool) -> None:
     """Generate a commit message for staged changes."""
+    if title_only:
+        yes = True
+
     plain_text = ctx.obj.get("plain_text", False)
     console = get_console(plain_text)
 
@@ -2099,7 +2136,8 @@ def commit(ctx: click.Context, no_compress: bool, show_prompt: bool, yes: bool) 
     ticket_number = extract_ticket_number(branch_name)
 
     # Build prompt
-    prompt = f"""{COMMIT_PROMPT}
+    commit_prompt = COMMIT_TITLE_ONLY_PROMPT if title_only else COMMIT_PROMPT
+    prompt = f"""{commit_prompt}
 
 ## Git Context
 - Branch: {branch_name}
@@ -2201,7 +2239,7 @@ def commit(ctx: click.Context, no_compress: bool, show_prompt: bool, yes: bool) 
     # Prepare fallback template for graceful degradation
     # Note: This template is compression-agnostic and doesn't include diff content,
     # so it works regardless of whether compression was applied or failed
-    fallback_template = get_commit_template(branch_name, ticket_number)
+    fallback_template = "<type>(<scope>): <subject>" if title_only else get_commit_template(branch_name, ticket_number)
 
     # Generate commit message with retry and fallback support
     commit_message: str | None = None
@@ -2223,12 +2261,15 @@ def commit(ctx: click.Context, no_compress: bool, show_prompt: bool, yes: bool) 
                 console,
                 generation_prompt,
                 str(repo.working_dir),
-                message="Generating commit message...",
+                message="Generating commit title..." if title_only else "Generating commit message...",
+                model="haiku" if title_only else None,
                 skip_file_based_delivery=skip_auto_file_delivery,
             )
             commit_message = extract_commit_message(raw_response)
             if commit_message:
                 commit_message = strip_markdown_code_blocks(commit_message)
+            if title_only and commit_message:
+                commit_message = truncate_title(commit_message)
             break  # Success, exit retry loop
 
         except ClaudeAuthenticationError as e:
