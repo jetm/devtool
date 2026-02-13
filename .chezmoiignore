@@ -1,6 +1,7 @@
 README.md
 LICENSE
 CLAUDE.md
+AGENTS.md
 .git
 .gitignore
 .chezmoi.toml.tmpl
