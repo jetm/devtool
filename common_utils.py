@@ -807,7 +807,7 @@ def retry_with_backoff(
                         await asyncio.sleep(delay)
                     else:
                         logger.error(f"All {_max_attempts} attempts failed. Last error: {e}")
-                except (ClaudeAuthenticationError, ClaudeCLIError, ClaudeContentError):
+                except ClaudeAuthenticationError, ClaudeCLIError, ClaudeContentError:
                     # Don't retry these errors
                     raise
 

@@ -295,7 +295,7 @@ def rename_and_push_branch(repo: git.Repo, old_name: str, new_name: str, console
         # Branch exists, ask user
         try:
             confirm = input(f"Branch '{new_name}' already exists locally. Overwrite? [y/N]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError, KeyboardInterrupt:
             console.print("\nAborted.")
             return False
 
@@ -391,7 +391,7 @@ def validate_branch_ready_for_mr(repo: git.Repo, branch_name: str, console: Cons
 
         try:
             choice = input("\nOptions: (c)ommit first, (a)bort, (i)gnore and continue: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError, KeyboardInterrupt:
             console.print("\nAborted.")
             return False
 
@@ -425,7 +425,7 @@ def validate_branch_ready_for_mr(repo: git.Repo, branch_name: str, console: Cons
 
         try:
             choice = input("\nOptions: (p)ush now, (a)bort: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError, KeyboardInterrupt:
             console.print("\nAborted.")
             return False
 
@@ -1541,7 +1541,7 @@ def handle_generation_error(
 
         try:
             choice = input("Would you like to (r)etry, use (t)emplate, or (a)bort? [r/t/a]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError, KeyboardInterrupt:
             console.print("\nAborted.")
             sys.exit(0)
 
@@ -2222,7 +2222,7 @@ def commit(ctx: click.Context, no_compress: bool, show_prompt: bool, yes: bool, 
         if not yes:
             try:
                 confirm = input("Send this prompt to Claude? [y/n]: ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
+            except EOFError, KeyboardInterrupt:
                 # Clean up temp file on abort
                 if prepared_temp_file is not None:
                     cleanup_temp_prompt_file(prepared_temp_file)
@@ -2459,7 +2459,7 @@ def commit(ctx: click.Context, no_compress: bool, show_prompt: bool, yes: bool, 
 
             try:
                 choice = input("Do you want to (e)dit, (c)ommit, or (a)bort? [e/c/a]: ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
+            except EOFError, KeyboardInterrupt:
                 console.print("\nAborted.")
                 sys.exit(0)
 
@@ -2744,7 +2744,7 @@ def mr_desc(ctx: click.Context, base: str | None) -> None:
 
         try:
             choice = input("Do you want to (e)dit, (c)reate, or (a)bort? [e/c/a]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError, KeyboardInterrupt:
             console.print("\nAborted.")
             sys.exit(0)
 
@@ -2839,7 +2839,7 @@ def mr_desc(ctx: click.Context, base: str | None) -> None:
         console.print("[yellow]No IOTIL ticket number detected in branch name.[/yellow]")
         try:
             ticket_input = input("Enter IOTIL ticket number (or press Enter to skip): ").strip()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError, KeyboardInterrupt:
             console.print("\nAborted.")
             sys.exit(0)
 
@@ -2867,7 +2867,7 @@ def mr_desc(ctx: click.Context, base: str | None) -> None:
 
         try:
             rename_choice = input("Rename branch? [Y/n]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError, KeyboardInterrupt:
             console.print("\nAborted.")
             sys.exit(0)
 
@@ -2880,7 +2880,7 @@ def mr_desc(ctx: click.Context, base: str | None) -> None:
                 )
                 try:
                     continue_choice = input("Continue with current branch? [y/N]: ").strip().lower()
-                except (EOFError, KeyboardInterrupt):
+                except EOFError, KeyboardInterrupt:
                     console.print("\nAborted.")
                     sys.exit(0)
 

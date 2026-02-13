@@ -302,7 +302,7 @@ def prompt_run_rebase(oldest_commit_hash: str) -> None:
     print()
     try:
         response = input("Do you want to run the interactive rebase now? [y/N]: ")
-    except (EOFError, KeyboardInterrupt):
+    except EOFError, KeyboardInterrupt:
         print()
         return
 

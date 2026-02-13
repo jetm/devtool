@@ -106,7 +106,7 @@ def parse_script_metadata(filepath: Path) -> dict[str, str | None]:
 
     try:
         content = filepath.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except OSError, UnicodeDecodeError:
         return result
 
     lines = content.splitlines()[:20]
@@ -145,7 +145,7 @@ def is_uv_script(filepath: Path) -> bool:
     """
     try:
         content = filepath.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except OSError, UnicodeDecodeError:
         return False
 
     # Look for the script metadata block as a standalone line (not in a string/comment)

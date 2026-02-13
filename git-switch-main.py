@@ -73,7 +73,7 @@ def detect_main_branch(repo: git.Repo) -> str | None:
             remote_exists = False
             try:
                 remote_exists = cached_branch in [ref.remote_head for ref in repo.remotes.origin.refs]
-            except (AttributeError, IndexError):
+            except AttributeError, IndexError:
                 pass
 
             if local_exists or remote_exists:
@@ -96,7 +96,7 @@ def detect_main_branch(repo: git.Repo) -> str | None:
             if "/" in target:
                 branch_name = target.split("/")[-1]
                 candidates.append(branch_name)
-    except (AttributeError, TypeError, KeyError):
+    except AttributeError, TypeError, KeyError:
         pass
 
     # Priority 3: Check common branch names
@@ -106,7 +106,7 @@ def detect_main_branch(repo: git.Repo) -> str | None:
     remote_branches: list[str] = []
     try:
         remote_branches = [ref.remote_head for ref in repo.remotes.origin.refs]
-    except (AttributeError, IndexError):
+    except AttributeError, IndexError:
         pass
 
     for name in common_names:
@@ -255,7 +255,7 @@ def switch_to_branch(repo: git.Repo, branch_name: str) -> None:
 
             console.print(f"[green]✓[/green] Created and switched to tracking branch: [bold]{branch_name}[/bold]")
             return
-    except (AttributeError, IndexError):
+    except AttributeError, IndexError:
         pass
 
     # Branch not found
