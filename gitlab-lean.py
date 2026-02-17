@@ -254,6 +254,20 @@ def merge_command(ctx: click.Context, mr_url: str) -> None:
                     f"[dim]push=none, merge=dev+maintainer, force_push=off, code_owner=off[/dim]"
                 )
 
+            # Wait for head pipeline to be created after rebase
+            console.print("[bold yellow]Waiting for pipeline after rebase...[/bold yellow]")
+            for attempt in range(30):
+                mr_data = gl.http_get(f"/projects/{project.id}/merge_requests/{mr_iid}")
+                head_pipeline = mr_data.get("head_pipeline")
+                if head_pipeline:
+                    logger.info(f"Pipeline #{head_pipeline['id']} found (status: {head_pipeline['status']})")
+                    break
+                if attempt > 0 and attempt % 5 == 0:
+                    logger.info(f"Still waiting for pipeline ({attempt * 2}s)...")
+                time.sleep(2)
+            else:
+                raise click.ClickException("No pipeline created after rebase (timed out after 60s)")
+
             # Wait for MR merge status to be computed after rebase
             console.print("[bold yellow]Waiting for merge status check...[/bold yellow]")
             for attempt in range(30):
@@ -308,12 +322,15 @@ def merge_command(ctx: click.Context, mr_url: str) -> None:
 
         finally:
             # Re-enable "Prevent approval by MR creator"
-            console.print("[bold yellow]Restoring author-approval restriction...[/bold yellow]")
-            gl.http_post(
-                f"/projects/{project.id}/approvals",
-                post_data={"merge_requests_author_approval": original_setting},
-            )
-            logger.info(f"Restored merge_requests_author_approval to {original_setting}")
+            try:
+                console.print("[bold yellow]Restoring author-approval restriction...[/bold yellow]")
+                gl.http_post(
+                    f"/projects/{project.id}/approvals",
+                    post_data={"merge_requests_author_approval": original_setting},
+                )
+                logger.info(f"Restored merge_requests_author_approval to {original_setting}")
+            except Exception as e:
+                logger.error(f"Failed to restore author-approval setting: {e}")
 
             # Ensure branch protection is restored even if we failed before the merge step
             if was_protected:
