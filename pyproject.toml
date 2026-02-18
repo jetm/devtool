@@ -1,3 +1,35 @@
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devtool"
+version = "0.1.0"
+description = "Developer workflow toolkit — AI commit messages, GitLab MR management, Linux assistance, and more"
+authors = [{name = "Javier Tia"}]
+requires-python = ">=3.14"
+dependencies = [
+    "claude-agent-sdk>=0.1",
+    "click>=8.1",
+    "rich>=13.0",
+    "gitpython>=3.1",
+    "python-gitlab>=4.0",
+    "atlassian-python-api>=3.0",
+    "google-api-python-client>=2.0",
+    "google-auth-oauthlib>=1.0",
+    "python-dateutil>=2.8",
+    "requests>=2.31",
+]
+
+[project.scripts]
+devtool = "devtool.cli:cli"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.ruff]
 target-version = "py314"
 line-length = 120
@@ -20,10 +52,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Runtime imports incorrectly flagged as type-only
-"aca.py" = ["TCH002", "E501"]  # E501: Long lines in prompt templates are intentional
-"lx.py" = ["TCH002", "E501"]   # E501: Long lines in prompt templates are intentional
-"common_utils.py" = ["TCH002"]
+"src/devtool/commit/command.py" = ["E501"]  # Long lines in prompt templates
+"src/devtool/mr_desc/command.py" = ["E501"]
+"src/devtool/ask/command.py" = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["common_utils"]
+known-first-party = ["devtool"]

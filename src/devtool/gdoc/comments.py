@@ -1,33 +1,4 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.14"
-# dependencies = [
-#     "click>=8.0.0",
-#     "google-api-python-client>=2.100.0",
-#     "google-auth>=2.20.0",
-#     "google-auth-oauthlib>=1.2.0",
-# ]
-# ///
-"""
-Google Docs Comments Fetcher
-
-Fetches and displays comments (with context) from a Google Docs document
-using the Google Drive API v3. Supports filtering by resolved status and
-displays reply threads.
-
-Setup:
-    1. Enable Google Drive API in Google Cloud Console
-    2. Create OAuth 2.0 Desktop credentials
-    3. Save credentials.json to ~/.config/aca/gdoc_credentials.json
-    4. Run the tool — it will open a browser for one-time OAuth consent
-
-Usage:
-    ./gdoc-comments.py https://docs.google.com/document/d/DOC_ID/edit
-    ./gdoc-comments.py DOC_ID
-    ./gdoc-comments.py DOC_ID --all          # Include resolved comments
-    ./gdoc-comments.py DOC_ID --resolved     # Only resolved comments
-    ./gdoc-comments.py DOC_ID --output comments.txt
-"""
+"""devtool gdoc-comments — Google Docs comment fetcher."""
 
 import re
 import sys
@@ -35,11 +6,6 @@ from datetime import datetime
 from pathlib import Path
 
 import click
-from google.auth.exceptions import RefreshError
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 CONFIG_DIR = Path.home() / ".config" / "aca"
@@ -69,8 +35,13 @@ def extract_file_id(doc_ref: str) -> str:
     sys.exit(1)
 
 
-def authenticate() -> Credentials:
+def authenticate():
     """Authenticate with Google Drive API using OAuth2 installed app flow."""
+    from google.auth.exceptions import RefreshError
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+
     if not CREDENTIALS_PATH.exists():
         click.echo(
             f"Error: OAuth credentials not found at {CREDENTIALS_PATH}\n\n"
@@ -102,8 +73,10 @@ def authenticate() -> Credentials:
     return creds
 
 
-def fetch_comments(file_id: str, creds: Credentials) -> list[dict]:
+def fetch_comments(file_id: str, creds) -> list[dict]:
     """Fetch all comments from a Google Docs document."""
+    from googleapiclient.discovery import build
+
     service = build("drive", "v3", credentials=creds)
     comments = []
 
@@ -188,7 +161,7 @@ def format_comment(comment: dict, index: int) -> str:
 @click.option("--all", "show_all", is_flag=True, help="Show all comments including resolved")
 @click.option("--resolved", "show_resolved", is_flag=True, help="Show only resolved comments")
 @click.option("--output", "-o", type=click.Path(), help="Write output to file instead of stdout")
-def main(document: str, show_all: bool, show_resolved: bool, output: str | None) -> None:
+def gdoc_comments(document: str, show_all: bool, show_resolved: bool, output: str | None) -> None:
     """Show comments from a Google Docs document.
 
     DOCUMENT can be a full Google Docs URL or a file ID.
@@ -236,7 +209,3 @@ def main(document: str, show_all: bool, show_resolved: bool, output: str | None)
         click.echo(f"Output written to {output}", err=True)
     else:
         click.echo(result)
-
-
-if __name__ == "__main__":
-    main()
